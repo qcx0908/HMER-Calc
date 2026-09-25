@@ -71,6 +71,9 @@ IDLE ─拍照/选图─▶ IMAGE_LOADED ─recognize()─▶ RECOGNIZED
 ```kotlin
 // android/.../common/Dto.kt —— 用 kotlinx.serialization，字段映射 snake_case
 @Serializable
+data class RecognRequest(val image: String)   // JPEG 字节的 base64，无 data URL 前缀
+
+@Serializable
 data class Token(
     val text: String,
     val confidence: Double,
@@ -84,6 +87,8 @@ data class RecognitionResponse(
     val latex: String,
     val confidence: Double,
     val tokens: List<Token> = emptyList(),
+    val status: String = "SUCCESS",          // "SUCCESS" | "ERROR"（识别失败）
+    val message: String? = null,
 )
 
 @Serializable
@@ -118,7 +123,7 @@ interface Calculator {
 ### 3.4 展示约定
 
 - 识别结果 `latex` 以**可编辑文本框**呈现（C7 的一等公民），不是只读展示。
-- `status != "SUCCESS"` 时显示 `message`，不让 App 崩溃。
+- 识别 `status == "ERROR"` 或计算 `status != "SUCCESS"` 时显示 `message`，不让 App 崩溃。
 - 结果优先渲染 `valueLatex`（若有），否则显示 `value` 数值。
 
 ---
@@ -134,8 +139,9 @@ interface Calculator {
   }
   ```
 - **依赖注入**：用 Hilt 把 `RemoteRecognizer`/`RemoteCalculator` 注入 ViewModel；**UI 层只依赖接口**。
-- **图像压缩**：上传前压缩（如最长边 ≤ 1024、JPEG 质量 85），减小传输量。
-- **错误处理**：网络失败（连不上后端）要给出友好提示（如"请确认已连接电脑热点"），不崩溃。
+- **图像压缩与编码**：上传前压缩（如最长边 ≤ 1024、JPEG 质量 85）减小传输量；`image` = 该 JPEG 字节的 base64，**无 `data:image/...;base64,` 前缀**。
+- **超时**：OkHttp read 超时调到 30s——首次 `/recognize` 要加载/下载模型（几秒到十几秒），默认 10s 会误判超时。
+- **错误处理**：网络失败（连不上后端）要给出友好提示（如"请确认已连接电脑热点"），不崩溃；识别/计算失败靠 JSON 的 `status` 区分，非 200 也要容错。
 
 ---
 

@@ -51,7 +51,7 @@ HTTP 请求 { "latex": "\frac{1}{2}+\sqrt{9}", "mode": "deg" }
 
 ### 3.1 服务地址约定
 
-- 默认端口 **8000**，与模块 1 同进程（`uvicorn app.main:app`），各自独立成 router。
+- 默认端口 **8000**，与模块 1 同进程，启动命令：`uvicorn app.main:app --host 0.0.0.0 --port 8000`（**必须 `--host 0.0.0.0`**，否则手机连不上），各自独立成 router。
 - `curl http://127.0.0.1:8000/health` 自测。
 
 ### 3.2 JSON 契约（本模块的请求/响应，放 `common/models.py`，与模块 1/3 共用）
@@ -60,6 +60,9 @@ HTTP 请求 { "latex": "\frac{1}{2}+\sqrt{9}", "mode": "deg" }
 # server/app/common/models.py
 from pydantic import BaseModel
 from typing import List, Optional
+
+class RecognizeRequest(BaseModel):
+    image: str                  # JPEG 字节的 base64，无 data URL 前缀
 
 class Token(BaseModel):
     text: str
@@ -72,6 +75,8 @@ class RecognitionResponse(BaseModel):
     latex: str
     confidence: float
     tokens: List[Token] = []
+    status: str = "SUCCESS"            # "SUCCESS" | "ERROR"（识别失败）
+    message: Optional[str] = None
 
 class CalculateRequest(BaseModel):
     latex: str
@@ -111,10 +116,12 @@ PARENS = "()"
 | 三角 | `\sin(30)` | `sin(30)`（deg 时换算） |
 | π / e | `\pi` / `e` | `pi` / `E` |
 
+> latex2sympy2 本身就能解析 `\left(`、`\right)`、`\cdot`、`\mathrm`、`\over` 等常见变体，**不用手写清洗**。上表是「必须覆盖的基线」；模块 1 透传的 pix2tex 原始输出若超出基线，交给 latex2sympy2 兜底解析，解析失败按 §4 返回 `PARSE_ERROR`。
+
 ### 3.4 两条铁律
 
-1. 结构一律按带花括号规范形式解析（`\frac{...}{...}`、`\sqrt{...}`、`a^{...}`）。
-2. 改词表/映射，必须同步通知模块 1 与模块 3。
+1. 优先支持花括号规范形式（`\frac{...}{...}`、`\sqrt{...}`、`a^{...}`）；`\left(...\right)`、`\cdot`、`\over` 等变体靠 latex2sympy2 兜底解析，不额外手写清洗。
+2. 改 `common/models.py` 的字段，必须同步通知模块 1 与模块 3。
 
 ---
 
@@ -159,7 +166,7 @@ PARENS = "()"
 
 ## 7. 需要额外下载的内容
 
-- **依赖**：`pip install -r requirements.txt`（含 fastapi、uvicorn、latex2sympy2、sympy、pydantic、pytest、httpx）。
+- **依赖**：`pip install -r requirements.txt`（全后端**共享一份**，含 pix2tex、latex2sympy2、sympy、fastapi、uvicorn、pydantic、pillow、pytest、httpx；pix2tex 会顺带装 torch）。
 - **无需训练集**。
 - 建议本地写好单元测试覆盖词表里每种运算（分数、幂、根号、三角、除零、非法结构）。
 
@@ -171,8 +178,8 @@ PARENS = "()"
 HMER-Calc/
 └── server/
     ├── app/
-    │   ├── main.py                      # FastAPI 入口，挂两个 router（模块 1+2 共用）
-    │   ├── common/                      # 共享契约（本模块与模块 1 共同维护）
+    │   ├── main.py                      # FastAPI 入口，挂两个 router（组长锁定）
+    │   ├── common/                      # 共享契约（组长锁定，成员只读）
     │   │   ├── models.py
     │   │   └── vocab.py
     │   └── calculation/                 # 本模块实现
@@ -189,9 +196,12 @@ HMER-Calc/
 
 ```python
 # tests/test_calculation.py —— 只测本模块，不依赖模块 1
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from app.main import app
+from app.calculation.router import router as calculation_router
 
+app = FastAPI()                 # 独立 app，只挂本模块 router
+app.include_router(calculation_router)
 client = TestClient(app)
 
 def test_fraction():

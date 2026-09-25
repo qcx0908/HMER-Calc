@@ -67,8 +67,8 @@
 - [ ] `uvicorn app.main:app --host 0.0.0.0 --port 8000` 能启动
 - [ ] `curl .../health` 返回 ok
 - [ ] `/calculate` 传 `1+2*3` 返回正确数值、`status="SUCCESS"`
-- [ ] `/recognize` 传 sample1.png 返回非空 `latex`（且符合词表）
-- [ ] 非法输入不 500 崩溃：除零、坏图等都要有合理返回（`/calculate` 走 `PARSE_ERROR`/`COMPUTE_ERROR` + `message`；字段以契约为准）
+- [ ] `/recognize` 传 sample1.png 返回 `status="SUCCESS"` 且非空 `latex`（pix2tex 原始输出）
+- [ ] 非法输入不 500 崩溃：除零、坏图等都要有合理返回（`/recognize` 走 `status="ERROR"` + `message`；`/calculate` 走 `PARSE_ERROR`/`COMPUTE_ERROR` + `message`）
 - [ ] `models.py` / `vocab.py` 与组长锁定版逐字一致
 - [ ] README 里 §三 的 4 件事都写了
 
