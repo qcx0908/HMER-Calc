@@ -65,15 +65,11 @@ IDLE ─拍照/选图─▶ IMAGE_LOADED ─recognize()─▶ RECOGNIZED
   2. **真机 USB**：`adb reverse tcp:8000 tcp:8000`，然后 App 用 `http://localhost:8000`
   3. **真机热点**（主用）：手机开热点，电脑连上，App 用电脑局域网 IP，如 `http://192.168.43.100:8000`
 - **明文 HTTP 配置**：本地是 http 明文，Manifest 需开启 `android:usesCleartextTraffic="true"`（或 network security config 仅放行该 IP）。
-- **后端必须 `--host 0.0.0.0` 启动**（默认 127.0.0.1 手机连不上）+ Windows 防火墙放行 8000。此项由后端（模块 1/2）保证，联调前先确认。
 
 ### 3.2 JSON 契约（本模块的 DTO，与后端 pydantic 字段一一对应）
 
 ```kotlin
 // android/.../common/Dto.kt —— 用 kotlinx.serialization，字段映射 snake_case
-@Serializable
-data class RecognRequest(val image: String)   // JPEG 字节的 base64，无 data URL 前缀
-
 @Serializable
 data class Token(
     val text: String,
@@ -88,8 +84,6 @@ data class RecognitionResponse(
     val latex: String,
     val confidence: Double,
     val tokens: List<Token> = emptyList(),
-    val status: String = "SUCCESS",          // "SUCCESS" | "ERROR"（识别失败）
-    val message: String? = null,
 )
 
 @Serializable
@@ -112,12 +106,12 @@ data class CalculateResponse(
 ```kotlin
 // common/Recognizer.kt —— 现在实现 RemoteRecognizer，日后可补 LocalRecognizer
 interface Recognizer {
-    suspend fun recognize(bitmap: Bitmap): RecognitionResponse
+    fun recognize(bitmap: Bitmap): RecognitionResponse
 }
 
 // common/Calculator.kt —— 现在实现 RemoteCalculator，日后可补 LocalCalculator
 interface Calculator {
-    suspend fun calculate(latex: String, mode: String = "deg"): CalculateResponse
+    fun calculate(latex: String, mode: String = "deg"): CalculateResponse
 }
 ```
 
@@ -139,20 +133,8 @@ interface Calculator {
       @POST("calculate")  suspend fun calculate(@Body body: CalculateRequest): CalculateResponse
   }
   ```
-  **容易漏的坑**：Retrofit 默认没有 kotlinx.serialization 转换器，不加会报"no converter"。需加依赖 `com.squareup.retrofit2:converter-kotlinx-serialization:2.11.0`，构建时：
-  ```kotlin
-  val json = Json { ignoreUnknownKeys = true }   // 后端以后加字段也不会崩
-  Retrofit.Builder()
-      .baseUrl(settings.baseUrl)
-      .client(okHttp)
-      .addConverterFactory(json.asConverterFactory("application/json".toMediaType()))
-      .build()
-  ```
-  （`asConverterFactory` 来自 `retrofit2.converter.kotlinx.serialization` 包。）
 - **依赖注入**：用 Hilt 把 `RemoteRecognizer`/`RemoteCalculator` 注入 ViewModel；**UI 层只依赖接口**。
-- **图像压缩**：上传前压缩（如最长边 ≤ 1024、JPEG 质量 85），减小传输量；`image` = 该 JPEG 字节的 base64，**无 `data:image/...;base64,` 前缀**。
-- **HTTP 语义约定**：业务错误（识别/计算失败）后端仍返回 HTTP 200，靠 JSON 里的 `status` 字段区分；仅请求体格式错误返回 4xx。客户端要同时容错非 200 响应。
-- **超时**：OkHttp read 超时调到 30s——首次识别要加载模型（几秒到十几秒），默认 10s 会误判超时。
+- **图像压缩**：上传前压缩（如最长边 ≤ 1024、JPEG 质量 85），减小传输量。
 - **错误处理**：网络失败（连不上后端）要给出友好提示（如"请确认已连接电脑热点"），不崩溃。
 
 ---
@@ -195,7 +177,6 @@ interface Calculator {
 | Compose BOM | 2024.06.00 或更新 |
 | compileSdk / targetSdk / minSdk | 34 / 34 / 26 |
 | Retrofit / OkHttp | 2.11.0 / 4.12.0 |
-| converter-kotlinx-serialization | 2.11.0（Retrofit 的 kotlinx 转换器，别漏） |
 | kotlinx.serialization | 1.7.x |
 | jlatexmath-android | 0.4.0 |
 | CameraX / Coil | 1.3.4 / 2.6.0 |
@@ -221,7 +202,7 @@ HMER-Calc/
     │   ├── Dto.kt                       # JSON DTO
     │   ├── Recognizer.kt                # 接口
     │   ├── Calculator.kt                # 接口
-    │   └── LatexVocab.kt                # 词表（可选；客户端不再过滤，仅供参考）
+    │   └── LatexVocab.kt                # 词表（与后端 vocab.py 一致）
     ├── remote/                          # 网络层（本模块实现）
     │   ├── CalcApi.kt                   # Retrofit 接口
     │   ├── RemoteRecognizer.kt          # 实现 common.Recognizer

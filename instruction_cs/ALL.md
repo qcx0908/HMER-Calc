@@ -6,34 +6,20 @@
 
 ---
 
-## 零、分工与合并约定（组长定案，避免独立开发后合不起来）
-
-- **组长先建仓库骨架并锁定契约文件**：`server/app/main.py`、`server/app/common/models.py`、`server/app/common/vocab.py` 由组长一次性写好提交，两个成员**只读不改**。
-- **成员 1 只写** `server/app/recognition/` + `tests/test_recognition.py`；**成员 2 只写** `server/app/calculation/` + `tests/test_calculation.py`，互不碰对方目录。
-- **合并**：两个目录 + 两个测试文件拷进骨架仓库，`main.py` 里两行 `include_router` 已就位，直接 `pytest` 全绿即交付组长。
-- **用 git 仓库**（Gitee/GitHub 均可）协作；`server/.gitignore` 至少忽略 `__pycache__/`、`.venv/`、模型权重、`*.pyc`。
-
----
-
 ## 一、全局契约核对（先验这个，任何一项不符都退回）
 
 - [ ] 后端统一端口 8000，一个 FastAPI 进程挂两个 router（`/recognize`、`/calculate`）
-- [ ] 后端启动带 `--host 0.0.0.0`（否则手机连不上）；Windows 防火墙放行 8000
 - [ ] `server/app/common/` 两个文件三方一致：
-  - [ ] `models.py`（`RecognizeRequest`/`Token`/`RecognitionResponse`/`CalculateRequest`/`CalculateResponse` 字段一致）
+  - [ ] `models.py`（`Token`/`RecognitionResponse`/`CalculateRequest`/`CalculateResponse` 字段一致）
   - [ ] `vocab.py`（词表一致，与 Android 端 `LatexVocab.kt` 一致）
 - [ ] JSON 字段一律 snake_case（`value_latex`、`range_start`），Android 用 `@SerialName` 映射
-- [ ] HTTP 语义：业务错误返回 200 + `status` 字段；仅请求体格式错误返回 4xx；客户端容错非 200
-- [ ] LaTeX 词表仅供报告参考，不作为过滤规则：识别输出原样透传 pix2tex，计算端靠 latex2sympy2 兜底解析
-- [ ] 契约字段改动同步通知；识别输出不做花括号规范化（`\left`/`\over` 等变体也原样传）
+- [ ] LaTeX 词表与映射双方遵守（`\frac/\sqrt/^{}/\times/\div/\sin/\cos/\tan/\pi/e` + 数字 + 括号）
+- [ ] 两条铁律遵守：结构带花括号规范形式；改词表/映射同步通知
 
 ### 契约基准（金标准，查验时对照）
 
 ```python
 # server/app/common/models.py
-class RecognizeRequest(BaseModel):
-    image: str
-
 class Token(BaseModel):
     text: str
     confidence: float
@@ -45,8 +31,6 @@ class RecognitionResponse(BaseModel):
     latex: str
     confidence: float
     tokens: List[Token] = []
-    status: str = "SUCCESS"            # "SUCCESS" | "ERROR"（识别失败）
-    message: Optional[str] = None
 
 class CalculateRequest(BaseModel):
     latex: str
@@ -62,48 +46,17 @@ class CalculateResponse(BaseModel):
 
 ```kotlin
 // android/.../common/Dto.kt（对应字段，snake_case 用 @SerialName 映射）
-@Serializable data class RecognRequest(val image: String)
 @Serializable data class Token(val text: String, val confidence: Double,
     @SerialName("range_start") val rangeStart: Int,
     @SerialName("range_end") val rangeEnd: Int,
     val alternatives: List<String> = emptyList())
 @Serializable data class RecognitionResponse(val latex: String, val confidence: Double,
-    val tokens: List<Token> = emptyList(), val status: String = "SUCCESS",
-    val message: String? = null)
+    val tokens: List<Token> = emptyList())
 @Serializable data class CalculateRequest(val latex: String, val mode: String = "deg")
 @Serializable data class CalculateResponse(val latex: String, val value: Double? = null,
     @SerialName("value_latex") val valueLatex: String? = null,
     val status: String, val message: String? = null)
 ```
-
-### 组长锁定的另外两个文件（照抄，成员只读）
-
-```python
-# server/app/main.py —— 组长写，成员不改
-from fastapi import FastAPI
-from app.recognition.router import router as recognition_router
-from app.calculation.router import router as calculation_router
-
-app = FastAPI(title="HMER-Calc Backend")
-app.include_router(recognition_router)
-app.include_router(calculation_router)
-
-@app.get("/health")
-def health():
-    return {"status": "ok"}
-```
-
-```
-# server/.gitignore —— 组长写
-__pycache__/
-*.pyc
-.venv/
-venv/
-.pytest_cache/
-```
-
-- `main.py` 引用的 `app/recognition/`、`app/calculation/` 由成员后续补齐；骨架阶段跑不起来是正常的，收到成员文件夹后即可运行。
-- 每个包目录都要一个空的 `__init__.py`：`app/`、`app/common/`、`app/recognition/`、`app/calculation/`。
 
 ---
 
@@ -113,7 +66,7 @@ venv/
 |---|---|---|---|
 | M1-1 | `/health` 可访问 | `curl http://127.0.0.1:8000/health` 返回 ok | ☐ |
 | M1-2 | `/recognize` 返回合法 JSON | `curl` 传 Base64 图，返回 `latex`+`confidence` | ☐ |
-| M1-3 | `latex` 合法 | 非空字符串即可（pix2tex 原始输出，含 `\left` 等变体也接受） | ☐ |
+| M1-3 | `latex` 合法 | 逐字符合词表，无 `\over`/`\left` 等 | ☐ |
 | M1-4 | `confidence` ∈ [0,1] | 抽查若干样本 | ☐ |
 | M1-5 | 独立测试通过 | `pytest tests/test_recognition.py` 全绿 | ☐ |
 | M1-6 | 不依赖模块 2 | 只挂 recognition router 也能启动并测通 | ☐ |
@@ -176,7 +129,7 @@ venv/
 
 1. 后端契约文件 `common/models.py` / `vocab.py` 被成员私自改动，三方不一致。
 2. `/recognize` 或 `/calculate` 遇非法输入返回 500 崩溃（必须返回结果对象）。
-3. 识别失败没走 `status="ERROR"` + `message` 通道（空 `latex` 冒充成功、或 500 崩溃）。
+3. 识别输出 `latex` 超出词表（含 `\over`、`\left`、`\right` 等未约定 token）。
 4. Android 端没走 `common` 接口、把 `RemoteRecognizer`/`RemoteCalculator` 具体类硬编码进 UI（日后无法换端侧实现）。
 5. 后端地址写死、不可配置，导致换真机/模拟器时无法切换。
 

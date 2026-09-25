@@ -28,9 +28,7 @@ HTTP 请求 { "latex": "\frac{1}{2}+\sqrt{9}", "mode": "deg" }
    --> 返回 JSON
 ```
 
-**角度制处理**：`mode="deg"` 时，对 `sin/cos/tan` 的参数做 `x * pi / 180` 换算后再交给 sympy。实现：latex2sympy2 解析成 sympy 表达式后**遍历 AST，把 `sin(x)` 改写为 `sin(x*pi/180)`**（`cos/tan` 同理），需处理嵌套（如 `\sin(30)^2`）。`mode` 非法值 → `status="PARSE_ERROR"`。
-
-**非数值结果**：sympy 结果含自由变量（如 `x+1`）时 `float()` 报错。规则：`float(expr)` 成功 → `value=结果`；报错 → `value=None`、`status="COMPUTE_ERROR"`、`message="结果非数值或含未知变量"`。`value_latex` 必须是可直接交给 jlatexmath 渲染的 LaTeX 片段。
+**角度制处理**：`mode="deg"` 时，对 `sin/cos/tan` 的参数做 `x * pi / 180` 换算后再交给 sympy（sympy 的三角默认弧度制）。
 
 ---
 
@@ -53,7 +51,7 @@ HTTP 请求 { "latex": "\frac{1}{2}+\sqrt{9}", "mode": "deg" }
 
 ### 3.1 服务地址约定
 
-- 默认端口 **8000**，与模块 1 同进程，启动命令：`uvicorn app.main:app --host 0.0.0.0 --port 8000`（**必须 `--host 0.0.0.0`**，否则手机连不上；Windows 防火墙放行 8000）。
+- 默认端口 **8000**，与模块 1 同进程（`uvicorn app.main:app`），各自独立成 router。
 - `curl http://127.0.0.1:8000/health` 自测。
 
 ### 3.2 JSON 契约（本模块的请求/响应，放 `common/models.py`，与模块 1/3 共用）
@@ -62,9 +60,6 @@ HTTP 请求 { "latex": "\frac{1}{2}+\sqrt{9}", "mode": "deg" }
 # server/app/common/models.py
 from pydantic import BaseModel
 from typing import List, Optional
-
-class RecognizeRequest(BaseModel):
-    image: str                  # JPEG 字节的 base64，无 data URL 前缀
 
 class Token(BaseModel):
     text: str
@@ -77,8 +72,6 @@ class RecognitionResponse(BaseModel):
     latex: str
     confidence: float
     tokens: List[Token] = []
-    status: str = "SUCCESS"            # "SUCCESS" | "ERROR"（识别失败）
-    message: Optional[str] = None
 
 class CalculateRequest(BaseModel):
     latex: str
@@ -94,7 +87,7 @@ class CalculateResponse(BaseModel):
 
 **JSON 字段命名铁律**：一律 **snake_case**（`value_latex`），Android 端用 `@SerialName` 映射。
 
-### 3.3 LaTeX 词表与映射（本模块必须能解析这些输入，含常见变体）
+### 3.3 LaTeX 词表与映射（本模块必须能逐字解析这些输入）
 
 ```python
 # server/app/common/vocab.py
@@ -118,12 +111,10 @@ PARENS = "()"
 | 三角 | `\sin(30)` | `sin(30)`（deg 时换算） |
 | π / e | `\pi` / `e` | `pi` / `E` |
 
-> latex2sympy2 本身就能解析 `\left(` `\right)` `\cdot` `\mathrm` `\over` 等常见变体，**不用手写清洗**。上面映射表是"必须覆盖的基线"；pix2tex 输出超出基线的变体交给 latex2sympy2 兜底，解析失败按 §4.1 返回 `PARSE_ERROR`。
-
 ### 3.4 两条铁律
 
-1. 优先支持花括号规范形式（`\frac{...}{...}`、`\sqrt{...}`、`a^{...}`）；`\left(...\right)`、`\cdot`、`\over` 等变体靠 latex2sympy2 兜底解析，不额外手写清洗。
-2. 改 `common/models.py` 的字段，必须同步通知模块 1 与模块 3。
+1. 结构一律按带花括号规范形式解析（`\frac{...}{...}`、`\sqrt{...}`、`a^{...}`）。
+2. 改词表/映射，必须同步通知模块 1 与模块 3。
 
 ---
 
@@ -133,58 +124,6 @@ PARENS = "()"
 - 实现封装成 `calculation/calculator.py` 里的 `Calculator`，router 只做参数校验与调用。
 - **错误处理是重点**：所有异常（解析失败、除零、未定义变量等）都要转成 `CalculateResponse`，`status` 取 `PARSE_ERROR` 或 `COMPUTE_ERROR` 并填 `message`，**绝不让接口 500 崩溃**。
 - 挂载点：`app/main.py` 中 `app.include_router(calculation_router)`。
-
-### 4.1 实现要点（照着写即可，别自己摸索）
-
-```python
-# calculation/calculator.py
-from latex2sympy2 import latex2sympy   # 包名 latex2sympy2，函数名 latex2sympy（别装成旧的 latex2sympy）
-from sympy import sin, cos, tan, pi, preorder_traversal, latex as sympy_latex
-from app.common.models import CalculateResponse
-
-def to_radians(expr):
-    """deg 模式：把 sin/cos/tan 的参数乘以 pi/180。"""
-    reps = {n: n.func(n.args[0] * pi / 180)
-            for n in preorder_traversal(expr) if n.func in (sin, cos, tan)}
-    return expr.xreplace(reps)      # 同步替换，嵌套三角（如 sin(cos(x))）也安全
-
-def calculate(latex_str: str, mode: str = "deg"):
-    if mode not in ("deg", "rad"):
-        return CalculateResponse(latex=latex_str, status="PARSE_ERROR", message="mode 非法")
-    try:
-        expr = latex2sympy(latex_str)              # 解析失败 → 抛异常
-    except Exception as e:
-        return CalculateResponse(latex=latex_str, status="PARSE_ERROR", message=str(e))
-    if mode == "deg":
-        expr = to_radians(expr)
-    try:
-        value = float(expr)                        # 含自由变量（如 x+1）会抛异常
-        return CalculateResponse(latex=latex_str, value=value,
-                                 value_latex=sympy_latex(expr), status="SUCCESS")
-    except Exception:
-        return CalculateResponse(latex=latex_str, status="COMPUTE_ERROR",
-                                 message="结果非数值或含未知变量")
-```
-
-- `value_latex` 直接用 `sympy.latex(expr)`，就是现成的可渲染 LaTeX（如 `\frac{1}{2}`），别再手工拼。
-- 三个分支都返回 `CalculateResponse` 对象，**绝不把异常抛到 FastAPI**（否则 500，触发红牌项）。
-
-### 4.2 本模块的 router（照抄即可）
-
-```python
-# calculation/router.py —— FastAPI 端点
-from fastapi import APIRouter
-from app.common.models import CalculateRequest, CalculateResponse
-from app.calculation.calculator import calculate
-
-router = APIRouter()
-
-@router.post("/calculate", response_model=CalculateResponse)
-def calculate_endpoint(req: CalculateRequest):
-    return calculate(req.latex, req.mode)
-```
-
-- `calculator.py`（§4.1）+ `router.py` 加在一起就是模块 2 的全部代码。
 
 ---
 
@@ -220,16 +159,7 @@ def calculate_endpoint(req: CalculateRequest):
 
 ## 7. 需要额外下载的内容
 
-- **依赖**：本模块单独一份 `requirements-calculation.txt`（fastapi、uvicorn、latex2sympy2、sympy、pydantic、pytest、httpx）；**不含 torch/pix2tex**。文件内容照抄：
-  ```
-  fastapi>=0.111
-  uvicorn>=0.30
-  pydantic>=2.0
-  latex2sympy2
-  sympy>=1.12
-  pytest>=8.0
-  httpx>=0.27
-  ```
+- **依赖**：`pip install -r requirements.txt`（含 fastapi、uvicorn、latex2sympy2、sympy、pydantic、pytest、httpx）。
 - **无需训练集**。
 - 建议本地写好单元测试覆盖词表里每种运算（分数、幂、根号、三角、除零、非法结构）。
 
@@ -241,19 +171,16 @@ def calculate_endpoint(req: CalculateRequest):
 HMER-Calc/
 └── server/
     ├── app/
-    │   ├── __init__.py                  # 空文件（Python 包标记，下同）
-    │   ├── main.py                      # FastAPI 入口，挂两个 router（组长锁定）
-    │   ├── common/                      # 共享契约（组长锁定）
-    │   │   ├── __init__.py
+    │   ├── main.py                      # FastAPI 入口，挂两个 router（模块 1+2 共用）
+    │   ├── common/                      # 共享契约（本模块与模块 1 共同维护）
     │   │   ├── models.py
     │   │   └── vocab.py
     │   └── calculation/                 # 本模块实现
-    │       ├── __init__.py
     │       ├── router.py                # POST /calculate
     │       └── calculator.py            # latex2sympy2 + sympy 封装
     ├── tests/
     │   └── test_calculation.py          # 本模块独立测试
-    └── requirements-calculation.txt     # 本模块依赖（无 torch）
+    └── requirements.txt
 ```
 
 ---
@@ -262,12 +189,9 @@ HMER-Calc/
 
 ```python
 # tests/test_calculation.py —— 只测本模块，不依赖模块 1
-from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from app.calculation.router import router as calculation_router
+from app.main import app
 
-app = FastAPI()                 # 独立 app，只挂本模块 router
-app.include_router(calculation_router)
 client = TestClient(app)
 
 def test_fraction():
