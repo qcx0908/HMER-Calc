@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# 虚拟环境（组长/成员各自 pip install，不提交）
+.venv/
+venv/
+
+# 模型权重（几百 MB，不提交，首次运行自动下载）
+*.pt
+*.pth
+*.ckpt
+*.onnx
+
+# IDE
+.idea/
+.vscode/
