@@ -1,0 +1,9 @@
+pix2tex
+latex2sympy2
+sympy
+fastapi
+uvicorn
+pydantic
+pillow
+pytest
+httpx
