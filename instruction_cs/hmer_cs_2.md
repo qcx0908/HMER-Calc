@@ -116,7 +116,7 @@ PARENS = "()"
 | 三角 | `\sin(30)` | `sin(30)`（deg 时换算） |
 | π / e | `\pi` / `e` | `pi` / `E` |
 
-> latex2sympy2 本身就能解析 `\left(`、`\right)`、`\cdot`、`\mathrm`、`\over` 等常见变体，**不用手写清洗**。上表是「必须覆盖的基线」；模块 1 透传的 pix2tex 原始输出若超出基线，交给 latex2sympy2 兜底解析，解析失败按 §4 返回 `PARSE_ERROR`。
+> latex2sympy2 本身就能解析 `\left(`、`\right)`、`\cdot`、`\mathrm`、`\over` 等常见变体，**不用手写清洗**。上表是「必须覆盖的基线」；模块 1 透传的 pix2text 原始输出若超出基线，交给 latex2sympy2 兜底解析，解析失败按 §4 返回 `PARSE_ERROR`。
 
 ### 3.4 两条铁律
 
@@ -130,6 +130,7 @@ PARENS = "()"
 - **`POST /calculate`**：请求 `{"latex": "...", "mode": "deg"|"rad"}`，响应 `CalculateResponse`。
 - 实现封装成 `calculation/calculator.py` 里的 `Calculator`，router 只做参数校验与调用。
 - **错误处理是重点**：所有异常（解析失败、除零、未定义变量等）都要转成 `CalculateResponse`，`status` 取 `PARSE_ERROR` 或 `COMPUTE_ERROR` 并填 `message`，**绝不让接口 500 崩溃**。
+- **C7 修正闭环（跨模块）**：用户修正后把新的 LaTeX 重新 POST 到本接口再算一次。修正的所见即所得编辑 UI 在模块 3（Android，见 `hmer_cs_3.md`），本模块只需保证「修正后的 LaTeX 仍能被 latex2sympy2 解析」，解析失败返回 `PARSE_ERROR` 让用户继续改。
 - 挂载点：`app/main.py` 中 `app.include_router(calculation_router)`。
 
 ---
@@ -166,7 +167,7 @@ PARENS = "()"
 
 ## 7. 需要额外下载的内容
 
-- **依赖**：`pip install -r requirements.txt`（全后端**共享一份**，含 pix2tex、latex2sympy2、sympy、fastapi、uvicorn、pydantic、pillow、pytest、httpx；pix2tex 会顺带装 torch）。
+- **依赖**：`pip install -r requirements.txt`（全后端**共享一份**，含 pix2text、latex2sympy2、sympy、fastapi、uvicorn、pydantic、pillow、pytest、httpx；pix2text 会顺带装 onnxruntime、cnocr、cnstd 等）。
 - **无需训练集**。
 - 建议本地写好单元测试覆盖词表里每种运算（分数、幂、根号、三角、除零、非法结构）。
 
@@ -223,6 +224,8 @@ def test_divide_by_zero():
 ```
 
 运行：`cd server && pytest tests/test_calculation.py`
+
+> **稳定性补充（对应 C7 所见即所得编辑）**：模块 3 用编辑器（huarangmeng/latex）回写的 LaTeX 形式可能与手写样例不同（如 `\sin 30` 不带括号、`2^3` 不带花括号、`\left(...\right)`）。建议补一组「编辑器输出样例」测试：把这些典型形式直接喂 `/calculate` 断言能 SUCCESS；跑不通的形式在模块 3 侧规范化后再发（见 `hmer_cs_3.md` §4.1）。
 
 ---
 

@@ -1,7 +1,7 @@
-# DELIVERY.md —— 模块 1+2 后端交付约定（成员 1 打包 / 组长验收）
+# DELIVERY.md —— 模块 1+2 后端交付约定（成员 2 整合打包 / 组长验收）
 
-> 用途：成员 1 把「模块 1（识别）+ 模块 2（计算）」合并、跑通、自测后，打包成**一个文件夹**交给组长。
-> 对象：成员 1（打包方）＋ 组长（接收方）。全局契约以同目录 `ALL.md` 为准。
+> 用途：成员 2 完成自身模块 2 后，接收模块 1 的识别内容，把「模块 1（识别）+ 模块 2（计算）」整合、跑通、自测后，打包成**一个文件夹**交给组长。
+> 对象：成员 2（整合打包方）＋ 组长（接收方）。全局契约以同目录 `ALL.md` 为准。
 > **核心目标：让组长拿到手就能——读得懂、装得起、跑得通、直接对接模块 3（Android）。**
 
 ---
@@ -9,7 +9,7 @@
 ## 一、必须交给组长的东西（★ = 少一样就退回）
 
 - ★ 1. **后端代码**：一个能启动的 FastAPI 项目，`/health`、`/recognize`、`/calculate` 三个接口都在、都能调通。
-- ★ 2. **依赖清单**：`requirements.txt`（一个或拆成多个都行），组长 `pip install` 后能装齐**两个模块**的全部依赖（pix2tex、latex2sympy2、sympy、fastapi、uvicorn、pydantic、pillow 等）。
+- ★ 2. **依赖清单**：`requirements.txt`（一个或拆成多个都行），组长 `pip install` 后能装齐**两个模块**的全部依赖（pix2text、latex2sympy2、sympy、fastapi、uvicorn、pydantic、pillow 等）。
 - ★ 3. **契约文件**：`app/common/models.py` + `app/common/vocab.py`，与组长锁定的版本**逐字一致**（金标准，改了整包退回）。
 - ★ 4. **一张测试图**：手写公式照片（如 `1+2`），组长拿来冒烟识别。
 - ★ 5. **一份「交付说明 README」**：讲清下面 §三 的 4 件事。
@@ -67,7 +67,7 @@
 - [ ] `uvicorn app.main:app --host 0.0.0.0 --port 8000` 能启动
 - [ ] `curl .../health` 返回 ok
 - [ ] `/calculate` 传 `1+2*3` 返回正确数值、`status="SUCCESS"`
-- [ ] `/recognize` 传 sample1.png 返回 `status="SUCCESS"` 且非空 `latex`（pix2tex 原始输出）
+- [ ] `/recognize` 传 sample1.png 返回 `status="SUCCESS"` 且非空 `latex`（pix2text 原始输出）
 - [ ] 非法输入不 500 崩溃：除零、坏图等都要有合理返回（`/recognize` 走 `status="ERROR"` + `message`；`/calculate` 走 `PARSE_ERROR`/`COMPUTE_ERROR` + `message`）
 - [ ] `models.py` / `vocab.py` 与组长锁定版逐字一致
 - [ ] README 里 §三 的 4 件事都写了

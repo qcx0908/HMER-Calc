@@ -19,14 +19,16 @@
 ```
 HTTP 请求 { "image": "<base64>" }
    --> 解码 Base64 --> PIL Image
-   --> 【C2 预处理】可选裁剪到公式区域 --> 交给 pix2tex（自带缩放/分辨率预测）
-   --> 【C3 识别】pix2tex 模型推理 --> LaTeX 字符串
-   --> 计算整体置信度 (可选: token 级置信度)
-   --> 封装为 RecognitionResponse(latex, confidence, tokens)
+   --> 【C2 预处理】EXIF 方向归正 + 尺寸控制（最长边 ≤1600）--> 生成方向候选（无 EXIF 时 0/90/180/270°）
+   --> 【C3 识别】pix2text（MFR 模型）逐方向推理 --> 每条 LaTeX + score
+   --> 多方向竞优取最优（≤2 字符退化输出降级）
+   --> 多行/多公式检测（array/matrix/cases 等 → ERROR）
+   --> 低置信度门槛（score < 0.95 → ERROR 让用户确认）
+   --> 封装为 RecognitionResponse(latex, confidence, tokens=[]) + X-Recognition-Meta 诊断头
    --> 返回 JSON
 ```
 
-**预处理（C2）**：pix2tex 自带预处理（自动预测最优分辨率并缩放），**不要做二值化/去噪**（会降低识别率）。可选：裁剪到公式区域。
+**预处理（C2）**：EXIF 方向归正（`ImageOps.exif_transpose`）+ 尺寸控制（最长边 ≤1600），**不要做二值化/去噪**（会降低识别率）。无可信 EXIF 时生成 0°/90°/180°/270° 四个方向候选。
 
 ---
 
@@ -35,13 +37,24 @@ HTTP 请求 { "image": "<base64>" }
 | 编号 | 功能 | 说明 |
 |---|---|---|
 | C2-1 | 图像解码 | Base64 → PIL Image |
-| C2-2 | 可选裁剪 | 裁剪到公式区域（可选） |
-| C2-3 | 交给模型 | pix2tex 自带缩放/归一化，无需手写预处理 |
-| C3-1 | 深度学习识别 | pix2tex（ViT+Transformer，现成强模型）图片→LaTeX |
-| C3-2 | 置信度输出 | 整体置信度；token 级作为可选 |
+| C2-2 | EXIF 方向归正 + 尺寸控制 | `exif_transpose` 归正方向；最长边 ≤1600 降采样 |
+| C2-3 | 方向候选 + 交给模型 | 无 EXIF 时生成 0/90/180/270° 候选；pix2text 推理 |
+| C3-1 | 深度学习识别 | pix2text（P2T，Transformer 架构的 MFR 数学公式识别模型，已用手写数据重训）图片→LaTeX |
+| C3-2 | 置信度输出 | 整体 score（Pix2Text 无 token 级，`tokens` 恒空 `[]`） |
 | — | 独立可测试 | 提供 `pytest tests/test_recognition.py` |
 
-> 说明：pix2tex 首次运行会自动下载模型权重（需联网一次）。CPU 可跑（单张 1–3 秒），有 NVIDIA 卡可装 CUDA 版 PyTorch 加速。
+> 说明：pix2text 首次运行会自动下载模型权重（需联网一次）。基于 onnxruntime，CPU 即可跑，无需 PyTorch/CUDA 配置。
+
+### 2.1 为什么用 pix2text + 本模块的识别加固语义
+
+> **为什么是 pix2text 而不是 pix2tex**：输入是纯手写公式。pix2tex（LaTeX-OCR）默认权重偏印刷体（im2latex 数据），对手写体准确率明显下降；pix2text（P2T）的 MFR 数学公式识别模型已用手写数据重训，对手写体更友好。代价是 pix2text 更重（cnocr/cnstd/onnxruntime）且**不输出 token 级信息**（见下面第 3 条）。
+
+以下四个语义是模块 1 实际实现里对契约最小集的加固，接口字段不变，只影响返回行为：
+
+1. **EXIF 方向归正 + 多方向竞优**：图片带可信 EXIF 时归正后只认 0°；无 EXIF 时在 0/90/180/270° 各识别一遍，按 score 取最优。对 ≤2 字符的退化输出（如 `\begin{matrix}\hline{}\\` 这类垃圾）降级，避免它压过正确结果。
+2. **多行/多公式检测**：识别出 `array`/`matrix`/`cases`/`aligned` 等多行环境且含 ≥2 处换行时，判定为多公式，返回 `status="ERROR"`（当前仅支持单一公式 C3，多公式 E7 未实现）。
+3. **低置信度门槛（score ≥ 0.95）**：最高分候选 < 0.95 时不输出结果，改 `status="ERROR"` + message，把决定权交回用户（对应 C7 闭环）。实测依据：正确样本 0.9568~1.0，错误样本 0.8977~0.9445。
+4. **`X-Recognition-Meta` 诊断头**：各方向 `angle`/`status`/`score`/`reason`/`seconds` 等诊断信息放 HTTP 响应头，不进入 JSON 契约体。
 
 ---
 
@@ -104,11 +117,11 @@ DIGITS = "0123456789"
 PARENS = "()"
 ```
 
-> 本模块识别输出**原样透传** pix2tex 的结果，**不做词表过滤、不做规范化**。pix2tex 可能输出 `\left(`、`\right)`、`\cdot`、`\over`、`\mathrm` 等变体，全部原样放进 `latex` 字段，由模块 2（latex2sympy2）兜底解析。上面词表只用于报告里说明支持范围。
+> 本模块识别输出**原样透传** pix2text 的结果，**不做词表过滤、不做规范化**。pix2text 可能输出 `\left(`、`\right)`、`\cdot`、`\over`、`\mathrm` 等变体，全部原样放进 `latex` 字段，由模块 2（latex2sympy2）兜底解析。上面词表只用于报告里说明支持范围。
 
 ### 3.4 两条铁律
 
-1. 识别输出原样透传 pix2tex 结果，不做词表过滤、不做结构规范化（`\left(`、`\over` 等变体也原样传）。
+1. 识别输出原样透传 pix2text 结果，不做词表过滤、不做结构规范化（`\left(`、`\over` 等变体也原样传）。
 2. 改 `common/models.py` 的字段，必须同步通知模块 2 与模块 3。
 
 ---
@@ -126,8 +139,8 @@ PARENS = "()"
 
 | 功能 | 预留方式 | 现在是否要做 |
 |---|---|---|
-| E3 候选符号推荐 | `Token.alternatives` 字段已预留 | 否（留空） |
-| E8 低置信度高亮 | `Token.confidence` + `range_start/end` 已预留 | 否 |
+| E3 候选符号推荐 | `Token.alternatives` 字段已预留 | 放弃（由 C7 所见即所得点选修正覆盖，见模块 3） |
+| E8 低置信度高亮 | `Token.confidence` + `range_start/end` 已预留 | 降级实现：整体 score<0.95 拦截（见 §2.1 第 3 条） |
 | E4 框选识别区域 | 客户端裁剪后上传，接口不变 | 否 |
 | E5 多公式 | 响应预留可扩展为 `List[RecognitionResponse]` | 否 |
 | B2 模型训练对比 | `recognizer.py` 换成自训模型实现即可 | 留接口 |
@@ -143,7 +156,7 @@ PARENS = "()"
 | 语言 | Python 3.10+（本模块与模块 2 同语言同仓库） |
 | Web 框架 | FastAPI + uvicorn |
 | 数据校验 | pydantic v2 |
-| 识别模型 | pix2tex（LaTeX-OCR） |
+| 识别模型 | pix2text（P2T，含 MFR 数学公式识别模型） |
 | 图像 | Pillow（可选 numpy/OpenCV） |
 
 | 组件 | 推荐版本 |
@@ -151,7 +164,7 @@ PARENS = "()"
 | Python | 3.10+ |
 | FastAPI / uvicorn | 0.111+ / 0.30+ |
 | pydantic | 2.x |
-| pix2tex | 最新（PyPI `pix2tex`，依赖 PyTorch） |
+| pix2text | 最新（PyPI `pix2text`，基于 onnxruntime） |
 | Pillow | 10.x |
 | pytest / httpx | 8.x / 0.27.x |
 
@@ -159,8 +172,8 @@ PARENS = "()"
 
 ## 7. 需要额外下载的内容
 
-- **依赖**：`pip install -r requirements.txt`（全后端**共享一份**，含 pix2tex、latex2sympy2、sympy、fastapi、uvicorn、pydantic、pillow、pytest、httpx；pix2tex 会顺带装 torch）。
-- **模型权重**：pix2tex 首次运行自动下载，需联网一次。
+- **依赖**：`pip install -r requirements.txt`（全后端**共享一份**，含 pix2text、latex2sympy2、sympy、fastapi、uvicorn、pydantic、pillow、pytest、httpx；pix2text 会顺带装 onnxruntime、cnocr、cnstd 等）。
+- **模型权重**：pix2text 首次运行自动下载，需联网一次。
 - **训练集**（仅 B2 自训时用，本次不落实）：CROHME 官方包（见旧 `hmer_calc_1.md` 第 7 节）。
 
 ---
@@ -177,7 +190,7 @@ HMER-Calc/
     │   │   └── vocab.py                 # 词表
     │   └── recognition/                 # 本模块实现
     │       ├── router.py                # POST /recognize
-    │       ├── recognizer.py            # pix2tex 封装
+    │       ├── recognizer.py            # pix2text 封装
     │       └── preprocess.py            # base64→PIL + 可选裁剪
     ├── tests/
     │   ├── fixtures/                    # 测试图片
@@ -222,7 +235,7 @@ def test_recognize_bad_image_returns_error():
 ## 10. 交付物与验收要点
 
 1. `POST /recognize` 可被 curl 调通，返回合法 `RecognitionResponse`。
-2. 输出 `latex` 为 pix2tex 原始输出（原样透传，含 `\left` 等变体也接受），`confidence` ∈ [0,1]。
+2. 输出 `latex` 为 pix2text 原始输出（原样透传，含 `\left` 等变体也接受），`confidence` ∈ [0,1]。
 3. `confidence` ∈ [0,1]。
 4. 独立测试 `pytest tests/test_recognition.py` 通过。
 5. 对照 `ALL.md`「模块 1 查验对照单」逐项自查。

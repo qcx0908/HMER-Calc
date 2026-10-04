@@ -27,6 +27,7 @@
 2. **加了 `conftest.py`**。为什么：让 pytest 自动把 `server/` 加进 `sys.path`，测试里的 `from app...` 才导入得到。别删。
 3. **加了 `.gitignore`**。为什么：防止 `.venv/`、`__pycache__/`、模型权重被误提交进 git。
 4. **`main.py` 里没有 `/health`**：`/health` 归成员 1，写在 `recognition/router.py`（见下第 4 条）。
+5. **识别模型 pix2tex → pix2text**：输入是纯手写公式，pix2tex 默认权重偏印刷体，已换成 pix2text（P2T，MFR 模型含手写数据重训）。`requirements.txt` 里 `pix2tex` 已改为 `pix2text`（基于 onnxruntime，无需 PyTorch）。成员 1 文档 `hmer_cs_1.md` 已同步。
 
 ## 三、协同铁律（两边都照做，才合得上）
 
@@ -43,8 +44,8 @@
 
 | 预留点 | 在哪 | 对应日后功能 |
 |---|---|---|
-| `Token.alternatives` / `confidence` / `range_*` | models.py | E3 候选推荐 / E8 低置信度高亮 |
-| `RecognitionResponse.tokens` | models.py | E3 / E8 |
+| `Token.alternatives` / `confidence` / `range_*` | models.py | 字段仍保留勿删；E3 已并入 C7、E8 降级为整体置信度拦截（见模块文档） |
+| `RecognitionResponse.tokens` | models.py | 恒为空 `[]`（Pix2Text 无 token 级输出） |
 | `CalculateResponse.value_latex` | models.py | E7 结果格式化 |
 | `CalculateRequest.mode`（deg/rad） | models.py | E6 模式切换 |
 | `recognizer.py` 里的 `Recognizer` 类 | recognition/ | B2 换自训模型只改这一个类 |

@@ -1,4 +1,4 @@
-pix2tex
+pix2text
 latex2sympy2
 sympy
 fastapi

@@ -23,7 +23,7 @@
   - [ ] `vocab.py`（词表一致，与 Android 端 `LatexVocab.kt` 一致）
 - [ ] JSON 字段一律 snake_case（`value_latex`、`range_start`），Android 用 `@SerialName` 映射
 - [ ] 两个响应都带 `status`+`message`（识别 SUCCESS/ERROR；计算 SUCCESS/PARSE_ERROR/COMPUTE_ERROR）；业务错误返回 200 + `status`，仅请求体格式错误返回 4xx
-- [ ] LaTeX 词表仅供报告参考、不作为过滤规则：识别输出原样透传 pix2tex，计算端靠 latex2sympy2 兜底解析
+- [ ] LaTeX 词表仅供报告参考、不作为过滤规则：识别输出原样透传 pix2text，计算端靠 latex2sympy2 兜底解析
 
 ### 契约基准（金标准，查验时对照）
 
@@ -85,11 +85,11 @@ class CalculateResponse(BaseModel):
 |---|---|---|---|
 | M1-1 | `/health` 可访问 | `curl http://127.0.0.1:8000/health` 返回 ok | ☐ |
 | M1-2 | `/recognize` 返回合法 JSON | `curl` 传 Base64 图，返回 `latex`+`confidence` | ☐ |
-| M1-3 | `latex` 合法 | 非空字符串即可（pix2tex 原始输出，含 `\left` 等变体也接受） | ☐ |
+| M1-3 | `latex` 合法 | 非空字符串即可（pix2text 原始输出，含 `\left` 等变体也接受） | ☐ |
 | M1-4 | `confidence` ∈ [0,1] | 抽查若干样本 | ☐ |
 | M1-5 | 独立测试通过 | `pytest tests/test_recognition.py` 全绿 | ☐ |
 | M1-6 | 不依赖模块 2 | 只挂 recognition router 也能启动并测通 | ☐ |
-| M1-7 | 预留字段未删 | `tokens`/`alternatives`/`range_*` 保留 | ☐ |
+| M1-7 | 预留字段未删 | `tokens`/`alternatives`/`range_*` 保留；Pix2Text 无 token 级输出，`tokens` 恒为空 `[]`（E3 放弃、E8 降级为整体置信度拦截） | ☐ |
 
 ---
 
