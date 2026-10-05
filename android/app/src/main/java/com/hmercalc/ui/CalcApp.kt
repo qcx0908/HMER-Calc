@@ -30,6 +30,7 @@ fun CalcApp(viewModel: CalcViewModel = viewModel()) {
             state = state,
             onImageUri = viewModel::onImageUri,
             onRetry = viewModel::retryRecognize,
+            onBaseUrlChanged = viewModel::setBaseUrl,
         )
     }
 }

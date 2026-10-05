@@ -20,6 +20,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -37,13 +38,14 @@ import com.hmercalc.ui.Phase
 import com.hmercalc.ui.UiState
 import java.io.File
 
-// 选图页（组长订正 2026-10 精简）：只负责拍照/选图 + 识别进度 + 错误重试 + 只读后端地址。
+// 选图页（组长订正 2026-10 精简）：只负责拍照/选图 + 识别进度 + 错误重试 + 可编辑后端地址。
 // 识别成功后由 CalcApp 切到结果页（含自动初算），LaTeX 编辑不再在本页出现。
 @Composable
 fun CaptureScreen(
     state: UiState,
     onImageUri: (Uri) -> Unit,
     onRetry: () -> Unit,
+    onBaseUrlChanged: (String) -> Unit,
 ) {
     val context = LocalContext.current
     var pendingCameraUri by remember { mutableStateOf<Uri?>(null) }
@@ -131,13 +133,37 @@ fun CaptureScreen(
                 Button(onClick = onRetry) { Text("重试识别") }
             }
 
-            // 后端地址（组长订正 2026-10：模拟器阶段只读展示，不提供输入；
-            // SettingsStore 与拦截器保留，真机适配时再开放编辑）
-            Text(
-                "后端地址：${state.baseUrl}",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.outline,
-            )
+            // 后端地址（组长订正 2026-10-06：开放编辑，真机换网络时在 App 内直接改，免重新打包）。
+            // 初值自动填入 SettingsStore 的默认值（模拟器 10.0.2.2 → 宿主机 8000），保存后立即生效。
+            var urlInput by remember(state.baseUrl) { mutableStateOf(state.baseUrl) }
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                OutlinedTextField(
+                    value = urlInput,
+                    onValueChange = { urlInput = it },
+                    label = { Text("后端地址") },
+                    singleLine = true,
+                    enabled = !state.loading,
+                    textStyle = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Button(
+                    onClick = { onBaseUrlChanged(urlInput) },
+                    enabled = !state.loading && urlInput.isNotBlank(),
+                ) { Text("保存地址") }
+
+                // 当前生效地址（保存后才变）+ 模拟器默认说明，均为浅灰小字
+                Text(
+                    "当前生效：${state.baseUrl}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.outline,
+                )
+                Text(
+                    "模拟器默认 http://10.0.2.2:8000（10.0.2.2 即电脑本机）；" +
+                        "真机改填电脑的局域网 IP，如 http://192.168.43.100:8000",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.outline,
+                )
+            }
         }
     }
 }

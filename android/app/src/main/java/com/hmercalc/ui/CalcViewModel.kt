@@ -66,13 +66,26 @@ class CalcViewModel @Inject constructor(
     val uiState: StateFlow<UiState> = _uiState.asStateFlow()
 
     init {
-        // 后端地址持久化 → 同步到运行期拦截器 + UI（本阶段 UI 只读展示，供后续真机测试启用编辑）
+        // 后端地址持久化 → 同步到运行期拦截器 + UI（UI 可编辑，见 setBaseUrl）
         viewModelScope.launch {
             settingsStore.baseUrlFlow.collect { url ->
                 BackendUrlHolder.baseUrl = url
                 _uiState.update { it.copy(baseUrl = url) }
             }
         }
+    }
+
+    // ---------------- 设置 ----------------
+
+    /**
+     * 保存后端地址。手输常漏 scheme，这里自动补 http://（不带 scheme 的地址会被拦截器判为无效而静默回退）。
+     * 写入 DataStore 后经 init 的订阅链立即生效，无需重启 App。
+     */
+    fun setBaseUrl(input: String) {
+        val raw = input.trim()
+        if (raw.isEmpty()) return
+        val url = if (raw.startsWith("http://") || raw.startsWith("https://")) raw else "http://$raw"
+        viewModelScope.launch { settingsStore.setBaseUrl(url) }
     }
 
     // ---------------- 识别 ----------------
