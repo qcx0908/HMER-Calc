@@ -127,7 +127,7 @@ class CalculateResponse(BaseModel):
 | M3-6 | UI 只依赖接口 | 可注入替换 `Local`/`Remote` 实现 | ☐ |
 | M3-7 | LaTeX 渲染正常 | jlatexmath 显示公式 | ☐ |
 | M3-8 | 明文 HTTP 已配置 | `usesCleartextTraffic` 或 network config | ☐ |
-| M3-9 | 后端地址可配置 | 能切换模拟器/真机热点地址（组长订正 2026-10：模拟器阶段 UI 只读展示、不给输入；切换能力保留在 SettingsStore+拦截器，真机验收前恢复 UI 编辑） | ☐ |
+| M3-9 | 后端地址可配置 | 能切换模拟器/真机热点地址（**已达成 2026-10-06**：App 内输入框 + 保存按钮，保存即生效、免重新打包；尚待真机热点实测确认） | ☐ |
 
 ---
 
@@ -155,7 +155,7 @@ class CalculateResponse(BaseModel):
 2. `/recognize` 或 `/calculate` 遇非法输入返回 500 崩溃（必须返回结果对象）。
 3. 识别失败没走 `status="ERROR"` + `message` 通道（空 `latex` 冒充成功、或 500 崩溃）。
 4. Android 端没走 `common` 接口、把 `RemoteRecognizer`/`RemoteCalculator` 具体类硬编码进 UI（日后无法换端侧实现）。
-5. 后端地址写死、不可配置，导致换真机/模拟器时无法切换（组长订正 2026-10：模拟器阶段 UI 只读展示属有计划简化、底层切换能力保留，不视为违反；真机阶段须恢复 UI 编辑）。
+5. 后端地址写死、不可配置，导致换真机/模拟器时无法切换。**已解除（组长订正 2026-10-06）**：UI 编辑已恢复，App 内即可切换地址、保存即生效。（沿革：2026-10 模拟器阶段曾简化为 UI 只读展示、底层切换能力保留，当时不视为违反。）
 
 ---
 

@@ -28,7 +28,9 @@
                               --> 【完成修正】保留改动回结果页 /【退出修正】放弃改动回结果页
    --> (E1) 可选：保存历史记录
 
-> ① 组长订正 2026-10：C1 现状先用「系统相机 + FileProvider」兜底（模拟器无真实摄像头）；CameraX 内嵌取景列入后续。
+> ① 组长订正 2026-10：C1 现状先用「系统相机 + FileProvider」兜底；CameraX 内嵌取景列入后续。
+>
+> ⚠️ **拍照权限铁律（组长订正 2026-10-06）**：本方式走 `ACTION_IMAGE_CAPTURE`，相机权限归**系统相机 App** 持有，故本 App 的 Manifest **绝不能声明 `android.permission.CAMERA`**。声明了却未申请运行时授权时，系统会以 `Permission Denial: ... with revoked permission android.permission.CAMERA` 抛 `SecurityException` 拒绝启动相机，未捕获即**闪退回桌面**（Pixel_7 AVD 实测连崩 3 次，栈顶为 `CaptureScreen.kt` 的 `cameraLauncher.launch(uri)`）。另注：模拟器 AVD 可配虚拟摄像头（`hw.camera.back=virtualscene`），并非「无摄像头」。
 ```
 
 **状态机（ViewModel 的 UiState，组长订正 2026-10）**：
@@ -67,7 +69,8 @@ correcting 子态内：【重新计算】原地刷新「最近一次计算」，
   2. **真机 USB**：`adb reverse tcp:8000 tcp:8000`，然后 App 用 `http://localhost:8000`
   3. **真机热点**（主用）：手机开热点，电脑连上，App 用电脑局域网 IP，如 `http://192.168.43.100:8000`
 - **明文 HTTP 配置**：本地是 http 明文，Manifest 需开启 `android:usesCleartextTraffic="true"`（或 network security config 仅放行该 IP）。
-- **组长订正 2026-10（模拟器阶段简化）**：后端地址在 UI 上只读展示（默认 `http://10.0.2.2:8000`，不提供输入/保存）。切换能力保留在 `data/SettingsStore` + `DynamicBaseUrlInterceptor`，真机适配时恢复 UI 编辑即可（与 ALL.md M3-9、红牌项 5 的标注一致）。
+- **组长订正 2026-10-06（UI 编辑已恢复）**：选图页底部提供「**后端地址**」输入框 + 「保存地址」按钮 + 浅灰小字提示（`当前生效：xxx` + 模拟器默认说明）。初值自动填入当前地址；手输省略 `http://` 时**自动补全**（漏 scheme 会被拦截器判为无效而**静默回退**，不易排查）。保存即写入 `data/SettingsStore`，经 `CalcViewModel` 订阅链同步到 `DynamicBaseUrlInterceptor` **立即生效**，无需重启 App、无需重新打包。识别中禁用输入。
+  - 沿革：2026-10 模拟器阶段曾简化为「UI 只读展示、不提供输入」，切换能力保留在 SettingsStore + 拦截器；2026-10-06 恢复 UI 编辑（ALL.md M3-9 达成、红牌项 5 解除）。
 
 ### 3.2 JSON 契约（本模块的 DTO，与后端 pydantic 字段一一对应）
 
@@ -131,7 +134,7 @@ interface Calculator {
 - 修正的进入/完成/退出全部由**显式按钮**驱动，清空输入框不会自动退出修正（组长订正 2026-10）。
 - 识别结果以**所见即所得公式**呈现（渲染 + 点选编辑，C7 的一等公民），不是只读 LaTeX 文本框。
 - 识别 `status == "ERROR"` 或计算 `status != "SUCCESS"` 时显示 `message`，不让 App 崩溃。
-- 结果优先渲染 `valueLatex`（若有），否则显示 `value` 数值。
+- 数值结果区：以大字号显示 `value` 数值；当 `valueLatex`（精确形式，如 `\frac{5}{6}`）与数值文本不同时，在其下**额外渲染一行**——二者并列（近似值 + 精确形式）供对照，相同则不重复渲染。后端在无精确形式时返回 `null`（如 rad 模式下的 `\sin 30`），此时只显示数值（组长订正 2026-10-06；此前 `rad` 档会把**输入式**当精确值回显，多出一行）。
 
 ---
 
