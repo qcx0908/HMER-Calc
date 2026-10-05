@@ -69,12 +69,18 @@ fun CaptureScreen(
         val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
         pendingCameraUri = uri
         cameraError = null
-        // 设备上没有可响应拍照 Intent 的相机 App 时，给出提示而不是崩溃（相册选图仍可用）
+        // 启动系统相机失败时给出提示而不是崩溃（相册选图仍可用）：
+        // ActivityNotFound = 设备没有能响应拍照 Intent 的相机 App；
+        // Security       = 相机被设备策略禁用等（2026-10-06 模拟器那次就是本 App 声明了
+        //                  未授权的 CAMERA 权限被拒，根因已在 AndroidManifest 移除该权限）。
         try {
             cameraLauncher.launch(uri)
         } catch (e: ActivityNotFoundException) {
             pendingCameraUri = null
             cameraError = "本机没有可用的相机应用，请改用「从相册选图」"
+        } catch (e: SecurityException) {
+            pendingCameraUri = null
+            cameraError = "系统拒绝了相机调用（相机可能被设备策略禁用），请改用「从相册选图」"
         }
     }
 

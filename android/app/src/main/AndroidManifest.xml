@@ -3,9 +3,12 @@
 
     <!-- 访问后端 HTTP 接口 -->
     <uses-permission android:name="android.permission.INTERNET" />
-    <!-- CameraX 拍照需要（选图走系统相册选择器，无需该权限） -->
-    <uses-permission android:name="android.permission.CAMERA" />
 
+    <!-- 拍照走系统相机 ACTION_IMAGE_CAPTURE（FileProvider 提供输出 URI），
+         相机权限由系统相机 App 自己持有，本 App 无需声明。
+         ⚠️ 不能声明 CAMERA：声明了却未获运行时授权时，系统会以
+         "with revoked permission android.permission.CAMERA" 直接拒绝启动相机（SecurityException 崩溃）。
+         组长订正 2026-10-06（此前模拟器点「拍照」即闪退回桌面的原因）。 -->
     <uses-feature
         android:name="android.hardware.camera"
         android:required="false" />
