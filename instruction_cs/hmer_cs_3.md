@@ -18,26 +18,27 @@
 
 ```
 启动 --> 主界面【拍照 / 选图】
-   --> 拍照 (CameraX) / 选图 (Photo Picker) --> 显示原图
+   --> 拍照 (系统相机 + FileProvider①) / 选图 (Photo Picker) --> 显示原图
    --> 压缩 + Base64 --> RemoteRecognizer.recognize() --> POST /recognize
-   --> 收到 RecognitionResponse --> 显示：原图 + 公式（所见即所得可编辑）+ 置信度
-   --> 用户：确认 / 所见即所得点选修正（渲染公式 → 点选 → 增删改）
-   --> RemoteCalculator.calculate() --> POST /calculate {latex, mode}
-   --> 收到 CalculateResponse --> 显示：渲染结果 + 数值结果
-   --> 用户可回到修正，反复循环【C7 闭环】
+   --> 识别成功 --> 自动先算一次 RemoteCalculator.calculate() --> POST /calculate {latex, mode="auto（默认）"}
+   --> 结果页：原图缩略 + 渲染公式 + LaTeX 源码（只读） + 数值结果（用户先判断对错）
+   --> 用户判定：✅ 结果正确 --> 完成本次任务（重置回初始）
+               ✗ 需要修正 --> 修正页（实时渲染预览 + LaTeX 编辑 + 分类符号面板）
+                              --> 手动【重新计算】反复调整【C7 闭环】
+                              --> 【完成修正】保留改动回结果页 /【退出修正】放弃改动回结果页
    --> (E1) 可选：保存历史记录
+
+> ① 组长订正 2026-10：C1 现状先用「系统相机 + FileProvider」兜底（模拟器无真实摄像头）；CameraX 内嵌取景列入后续。
 ```
 
-**状态机（ViewModel 的 UiState）**：
+**状态机（ViewModel 的 UiState，组长订正 2026-10）**：
 
 ```
-IDLE ─拍照/选图─▶ IMAGE_LOADED ─recognize()─▶ RECOGNIZED
-                                               │ 确认 / 编辑
-                                               ▼
-                                           (EDITING) ◀──┐
-                                               │ 点选改公式 │ 重新计算 C7
-                                               ▼          │
-                                           COMPUTED ─────┘
+IDLE ─拍照/选图─▶ IMAGE_LOADED ─识别成功(自动初算)─▶ RESULT（结果视图，用户判定对/错）
+IDLE ◀─【结果正确】(完成本次任务)──────────────────────┘
+IMAGE_LOADED ─识别失败─▶ ERROR（可【重试识别】）
+RESULT ─【需要修正】─▶ correcting 子态（修正视图）─【完成修正】/【退出修正】─▶ RESULT
+correcting 子态内：【重新计算】原地刷新「最近一次计算」，不退出
 ```
 
 ---
@@ -46,11 +47,12 @@ IDLE ─拍照/选图─▶ IMAGE_LOADED ─recognize()─▶ RECOGNIZED
 
 | 编号 | 功能 | 说明 |
 |---|---|---|
-| C1 | 拍照 / 选图入口 | CameraX + Photo Picker |
-| C6-1 | LaTeX 渲染回显 | jlatexmath 渲染，供核对 |
-| C6-2 | 计算结果显示 | 展示 `CalculateResponse.value` / `valueLatex` |
-| C7 | 手动修正 | 所见即所得：渲染公式 → 点选符号 → 符号表替换/增删 → 回写 LaTeX → 重算 |
-| C8 | 主界面 + 结果界面 | 完整操作闭环 |
+| C1 | 拍照 / 选图入口 | Photo Picker；拍照先用系统相机 + FileProvider（组长订正 2026-10，CameraX 内嵌取景列入后续） |
+| C6-1 | LaTeX 渲染回显 | jlatexmath 渲染供核对；修正页实时预览带 250ms 防抖 + 半成品公式渲染兜底（组长订正 2026-10）；结果页渲染公式下方并列只读 LaTeX 源码（2026-10 按用户需求新增） |
+| C6-2 | 计算结果显示 | 识别后**自动先算一次**并展示 `value` / `valueLatex`，供用户判定（组长订正 2026-10） |
+| C6-3 | 角度模式三态 | 自动（默认）/ 角度° / 弧度；结果页切换即自动重算（组长订正 2026-10，替代原强制二选一） |
+| C7 | 手动修正 | 阶段一（已落实 2026-10）：实时渲染预览 + 分类符号面板（光标处插入 / 包裹选中文本 / 插入内容变色高亮）+ 显式【重新计算 / 完成修正 / 退出修正】；阶段二（待启动）：在渲染公式上直接点选符号替换（WYSIWYG，先做 spike） |
+| C8 | 主界面 + 结果界面 | 完整操作闭环（识别 → 自动初算 → 判定 →（必要时）修正 → 结果） |
 | — | 网络层 | Retrofit 封装 `RemoteRecognizer` / `RemoteCalculator` |
 | — | 依赖注入 | Hilt 注入接口，UI 不依赖具体实现 |
 
@@ -65,6 +67,7 @@ IDLE ─拍照/选图─▶ IMAGE_LOADED ─recognize()─▶ RECOGNIZED
   2. **真机 USB**：`adb reverse tcp:8000 tcp:8000`，然后 App 用 `http://localhost:8000`
   3. **真机热点**（主用）：手机开热点，电脑连上，App 用电脑局域网 IP，如 `http://192.168.43.100:8000`
 - **明文 HTTP 配置**：本地是 http 明文，Manifest 需开启 `android:usesCleartextTraffic="true"`（或 network security config 仅放行该 IP）。
+- **组长订正 2026-10（模拟器阶段简化）**：后端地址在 UI 上只读展示（默认 `http://10.0.2.2:8000`，不提供输入/保存）。切换能力保留在 `data/SettingsStore` + `DynamicBaseUrlInterceptor`，真机适配时恢复 UI 编辑即可（与 ALL.md M3-9、红牌项 5 的标注一致）。
 
 ### 3.2 JSON 契约（本模块的 DTO，与后端 pydantic 字段一一对应）
 
@@ -92,7 +95,7 @@ data class RecognitionResponse(
 )
 
 @Serializable
-data class CalculateRequest(val latex: String, val mode: String = "deg")
+data class CalculateRequest(val latex: String, val mode: String = "auto")   // 组长订正 2026-10：默认 auto
 
 @Serializable
 data class CalculateResponse(
@@ -116,12 +119,16 @@ interface Recognizer {
 
 // common/Calculator.kt —— 现在实现 RemoteCalculator，日后可补 LocalCalculator
 interface Calculator {
-    fun calculate(latex: String, mode: String = "deg"): CalculateResponse
+    fun calculate(latex: String, mode: String): CalculateResponse   // mode ∈ "deg" | "rad" | "auto"（组长订正 2026-10）
 }
 ```
 
 ### 3.4 展示约定
 
+- 识别成功后**自动先算一次**，先给计算值让用户判定「对 / 错」；仅当判错才进修正（组长订正 2026-10）。
+- 结果页在渲染公式下方**并列只读展示 LaTeX 源码**（等宽字体 + 细边框，2026-10 按用户需求新增）：二者一一对应，供核对识别结果；需要改动仍走【需要修正】页的编辑框，本页不提供编辑。
+- 修正页提供 LaTeX 的**实时渲染预览**（防抖 + 失败兜底）；操作以「可读公式 + 分类符号面板」为主、LaTeX 文本框为辅；完全点选替换（WYSIWYG）列阶段二（组长订正 2026-10）。符号面板「基础运算」含 `π` 与 `e`（自然常数，2026-10 按用户需求新增，后端 `vocab.py` 的 `E` 早已在册）；进入修正页时**光标默认落在公式末尾**（2026-10 按用户需求），直接点符号即追加，想插在别处可先点输入框定位。
+- 修正的进入/完成/退出全部由**显式按钮**驱动，清空输入框不会自动退出修正（组长订正 2026-10）。
 - 识别结果以**所见即所得公式**呈现（渲染 + 点选编辑，C7 的一等公民），不是只读 LaTeX 文本框。
 - 识别 `status == "ERROR"` 或计算 `status != "SUCCESS"` 时显示 `message`，不让 App 崩溃。
 - 结果优先渲染 `valueLatex`（若有），否则显示 `value` 数值。
@@ -144,6 +151,8 @@ interface Calculator {
 - **错误处理**：网络失败（连不上后端）要给出友好提示（如"请确认已连接电脑热点"），不崩溃；识别/计算失败靠 JSON 的 `status` 区分，非 200 也要容错。
 
 ### 4.1 C7 所见即所得编辑的三条稳定性保障
+
+> 组长订正 2026-10：C7 分两阶段——**阶段一（已落实）**：实时渲染预览 + 分类符号面板插入 + 显式进出修正；**阶段二（待启动）**：在渲染公式上直接点选符号替换。下列 ① 的编辑器 spike 属阶段二前置；②③ 在阶段一已生效（渲染兜底、PARSE_ERROR 不崩）。
 
 针对「渲染成公式 → 点选 → 增删改 → 回写 LaTeX → 重算」链路的三个已知风险，各一条落实手段：
 
@@ -175,7 +184,7 @@ interface Calculator {
 | E2 导出分享 | UI 加按钮；LaTeX 源码已在响应里 | 否 |
 | E3/E8 候选与高亮 | E3 已并入 C7 点选修正；E8 降级为整体置信度拦截（后端已做，见 hmer_cs_1.md） | 否 |
 | E4 框选区域 | 加裁剪交互，上传裁剪后图片 | 否 |
-| E6 模式切换 | UI 加 deg/rad 切换，传入 `mode` | 可选 |
+| E6 模式切换 | 已完成（组长订正 2026-10：升级为 自动/角度/弧度 三态，默认自动） | 已做 |
 | E9 界面优化 | theme / 多语言 / 夜间模式 | 否 |
 | B1 端侧部署 | 补 `LocalRecognizer`/`LocalCalculator` 实现 | 否（余量） |
 | B4 实时流式识别 | 加相机预览 + 连续调 `/recognize` | 否 |
@@ -191,7 +200,7 @@ interface Calculator {
 | UI | Jetpack Compose（单 Activity） |
 | 架构 | MVVM + Repository + `StateFlow` |
 | 网络 | Retrofit + OkHttp + kotlinx.serialization |
-| 渲染（只读结果） | noties/jlatexmath-android |
+| 渲染（只读结果） | ru.noties:jlatexmath-android（组长订正：原写 `noties/jlatexmath-android` 是 GitHub 仓库路径，Maven 坐标组为 `ru.noties`） |
 | 编辑（C7 所见即所得） | huarangmeng/latex（KMP，含 WYSIWYG 编辑器） |
 | 图像 | CameraX、Photo Picker、Coil |
 | DI | Hilt |
@@ -207,7 +216,7 @@ interface Calculator {
 | compileSdk / targetSdk / minSdk | 34 / 34 / 26 |
 | Retrofit / OkHttp | 2.11.0 / 4.12.0 |
 | kotlinx.serialization | 1.7.x |
-| jlatexmath-android | 0.4.0 |
+| jlatexmath-android | 0.2.0（组长订正：原写 0.4.0，Maven 中央仓库无此版本，实际最新为 0.2.0） |
 | huarangmeng/latex | 1.5.0（或与 Kotlin 版本匹配的变体，以实际发布为准） |
 | CameraX / Coil | 1.3.4 / 2.6.0 |
 | Room / DataStore | 2.6.1 / 1.1.1 |
@@ -261,9 +270,9 @@ HMER-Calc/
 
 ## 10. 交付物与验收要点
 
-1. 端到端流程可走通：选图 → 识别 → 显示 → 修正 → 计算 → 结果。
+1. 端到端流程可走通：选图 → 识别 → 自动初算 → 用户判定 →（必要时修正重算）→ 结果。
 2. UI 只依赖 `common` 接口，不依赖 `RemoteRecognizer`/`RemoteCalculator` 具体类（可注入替换）。
-3. 识别结果以可编辑文本框呈现，修正后能重新计算（C7 闭环）。
+3. 识别后自动初算供判定；判错可进修正（实时渲染 + 符号面板编辑），修正后能重新计算（C7 闭环，组长订正 2026-10）。
 4. 结果与错误信息都能正常展示，网络失败不崩溃。
 5. LaTeX 公式用 jlatexmath 正常渲染。
 6. 模拟器 + 真机（热点）各验证一次全流程。

@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- FileProvider 可分享路径：拍照临时图片存在 cache/files 目录 -->
+<paths>
+    <cache-path name="captured_images" path="." />
+    <files-path name="captured_files" path="." />
+</paths>
