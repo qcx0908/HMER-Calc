@@ -78,7 +78,19 @@ class Calculator:
 
         # ---------- 3. 计算：sympy 求值 → float ----------
         try:
-            value_latex = sympy.latex(expr)
+            # value_latex 必须是**结果**的 LaTeX（契约：E7 结果格式化）。
+            # rad 模式不做角度换算，expr 仍是解析后的原始输入式（`1+2*3`、`2^{3}`），
+            # 直接 latex 会把**输入**当结果回显；而 deg/auto 换算时会重建表达式，
+            # sympy 顺带求值，于是恰好是结果——三档行为不一致，
+            # 客户端「数值 + 精确值」两行的去重逻辑失效，rad 档会多显示一行（组长订正 2026-10-06）。
+            # 故先化简；化简后仍含未求值函数（如 sin(30)，非精确形式）的置 None，
+            # 客户端只显示数值。
+            simplified = sympy.simplify(expr)
+            if simplified.is_number and not simplified.atoms(sympy.Function):
+                value_latex = sympy.latex(simplified)
+            else:
+                value_latex = None
+
             numeric = expr.evalf()
             value = float(numeric)
 
