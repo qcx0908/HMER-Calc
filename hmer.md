@@ -162,16 +162,14 @@ cd /e/HMER-Calc/module_1_2
 控制面板 → Windows Defender 防火墙 → 高级设置 → **入站规则** → 新建规则 → 端口 → TCP 8000 → 允许连接。
 （排查阶段也可先临时关闭防火墙，确认是它挡的再加规则。）
 
-### 第 5 步：把 App 后端地址改成电脑 IP（⚠️ 关键，当前默认是模拟器专用）
+### 第 5 步：在 App 里改后端地址（已支持界面编辑，2026-10-06）
 
-当前 App 实际请求地址由 `BackendUrlHolder.baseUrl` 决定（拦截器读它），默认写死 `http://10.0.2.2:8000`——**真机上这个地址不通**。改法二选一：
+选图页底部有「后端地址」输入框 + 「保存地址」按钮，**在 App 内直接改，无需重新编译**。
 
-- **方案 A（不依赖我，改默认值重编译）**：改两个文件的默认值为电脑 IP，再重编译装机：
-  - `android/app/src/main/java/com/hmercalc/remote/DynamicBaseUrlInterceptor.kt` 里的 `BackendUrlHolder.baseUrl`
-  - `android/app/src/main/java/com/hmercalc/data/SettingsStore.kt` 里的 `DEFAULT_BASE_URL`
-- **方案 B（一劳永逸，需改 UI）**：恢复后端地址的输入框（当前 UI 只读展示，是「真机适配时再开放」预留项）。要我做的话说一声，我在设置页加个可编辑地址栏，改了即存 DataStore、无需重编译。
+- 真机填电脑 IP（如 `http://192.168.43.100:8000`；`http://` 前缀可省略，App 自动补），点「保存地址」即写入 DataStore、**立即生效**，下次启动仍保留。
+- 模拟器默认 `http://10.0.2.2:8000`（`10.0.2.2` 即电脑本机）。
 
-> 提示：方案 A 每次换热点/WiFi 都要改 IP 重编译；方案 B 改一次代码，之后在 App 里随手改。
+> 机制：地址存 `SettingsStore`（DataStore），经 `CalcViewModel` 订阅链同步到运行期拦截器 `BackendUrlHolder.baseUrl`，所以保存即生效、无需重启 App。
 
 ### 第 6 步：装 APK 到真机
 
@@ -215,6 +213,5 @@ adb install -r /e/HMER-Calc/android/app/build/outputs/apk/debug/app-debug.apk
   - `443df1b` feat: Android 客户端首次入库 + 本轮 UI 改进
 - 后端与模拟器当前**均未运行**（上次会话结束后已停）。
 - 待办 / 可继续的方向：
-  - 真机验证拍照识别（见 §七，需先处理第 5 步的后端地址）。
-  - 恢复后端地址 UI 编辑（方案 B，见 §七第 5 步）。
+  - 真机验证拍照识别（见 §七；后端地址已在 App 内可编辑，见 §七第 5 步）。
   - 之前规划的优化项（首请求模型加载延迟、方向竞优顺序等）按需再议。

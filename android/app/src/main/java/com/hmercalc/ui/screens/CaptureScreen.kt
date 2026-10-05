@@ -1,5 +1,6 @@
 package com.hmercalc.ui.screens
 
+import android.content.ActivityNotFoundException
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
@@ -49,6 +50,7 @@ fun CaptureScreen(
 ) {
     val context = LocalContext.current
     var pendingCameraUri by remember { mutableStateOf<Uri?>(null) }
+    var cameraError by remember { mutableStateOf<String?>(null) }
 
     val cameraLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.TakePicture()
@@ -66,7 +68,14 @@ fun CaptureScreen(
         val file = File(context.cacheDir, "capture_${System.currentTimeMillis()}.jpg")
         val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
         pendingCameraUri = uri
-        cameraLauncher.launch(uri)
+        cameraError = null
+        // 设备上没有可响应拍照 Intent 的相机 App 时，给出提示而不是崩溃（相册选图仍可用）
+        try {
+            cameraLauncher.launch(uri)
+        } catch (e: ActivityNotFoundException) {
+            pendingCameraUri = null
+            cameraError = "本机没有可用的相机应用，请改用「从相册选图」"
+        }
     }
 
     Scaffold { padding ->
@@ -78,7 +87,13 @@ fun CaptureScreen(
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            Text("HMER-Calc 手写公式计算", style = MaterialTheme.typography.headlineSmall)
+            // 标题（组长订正 2026-10-06）：改全称；字号从 headlineSmall 降到 titleLarge，
+            // 长标题在窄屏（360dp 档）也能单行放下，放不下时正常换行，不会顶出显示区
+            Text(
+                "HMER-Calc 手写公式识别计算系统",
+                style = MaterialTheme.typography.titleLarge,
+                modifier = Modifier.fillMaxWidth(),
+            )
 
             // 图片预览
             val bitmap = state.imageBitmap
@@ -113,6 +128,7 @@ fun CaptureScreen(
                     enabled = !state.loading,
                 ) { Text("从相册选图") }
             }
+            cameraError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
 
             // 加载中（识别首次可能要加载模型，给出提示避免误判卡死）
             if (state.loading) {
