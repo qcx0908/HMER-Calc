@@ -20,7 +20,7 @@ class RecognitionResponse(BaseModel):
 
 class CalculateRequest(BaseModel):
     latex: str
-    mode: str = "deg"              # "deg" | "rad"
+    mode: str = "deg"              # "deg" | "rad" | "auto"（组长订正：新增 auto，默认值保持 deg 不变）
 
 class CalculateResponse(BaseModel):
     latex: str

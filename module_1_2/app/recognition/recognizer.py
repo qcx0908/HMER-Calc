@@ -23,7 +23,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from PIL import Image
 
-from app.recognition import preprocess
+from app.recognition import postprocess, preprocess
 
 __all__ = [
     "RecognitionOutcome",
@@ -287,37 +287,64 @@ class Recognizer:
         )
 
     # -- 对外入口 ------------------------------------------------------------------
-    def recognize(self, image: Image.Image, *, try_multiple_orientations: bool = True) -> RecognitionOutcome:
-        """识别一张图片，必要时在多个旋转方向上竞优。
+    @staticmethod
+    def _attempt_note(outcome: RecognitionOutcome, angle: int, stage: str) -> Dict[str, Any]:
+        """构造 `meta["attempted"]` 里的一条诊断记录。"""
+        return {
+            "angle": angle,
+            "stage": stage,
+            "status": outcome.status,
+            "score": outcome.confidence,
+            "reason": outcome.meta.get("reason"),
+            "chars": len(outcome.latex),
+            "seconds": outcome.meta.get("seconds"),
+        }
 
-        流程：EXIF 归正 + 尺寸控制 + 方向候选（preprocess）→ 逐个识别 → 按 score 取最优。
-        图片自带 EXIF 时只有一个候选（0°），无 EXIF 时有四个。
+    def _run_pass(
+        self,
+        candidates: List[Dict[str, Any]],
+        *,
+        stage: str,
+        use_crop: bool,
+    ) -> Tuple[Optional[RecognitionOutcome], List[Dict[str, Any]]]:
+        """跑一轮候选方向竞优。
+
+        `use_crop=True` 时先对每个候选 `preprocess.crop_to_ink`：
+        裁剪无变化的候选（纯背景/裁剪无意义）**跳过**——同一张图重复推理结果一样，
+        白白多花 0.3~1s；调用方据 `crop_noop` 仍能看出该轮跑过。
+
+        返回 `(best, attempted)`；`best` 为 None 表示整轮候选都被跳过。
         """
-        candidates = preprocess.prepare_candidates(
-            image, try_multiple_orientations=try_multiple_orientations
-        )
-        exif_corrected = bool(candidates and candidates[0].get("exif_corrected"))
-
         attempted: List[Dict[str, Any]] = []
         best: Optional[RecognitionOutcome] = None
         for item in candidates:
-            outcome = self._evaluate(item["image"], item["angle"])
-            attempted.append(
-                {
-                    "angle": item["angle"],
-                    "status": outcome.status,
-                    "score": outcome.confidence,
-                    "reason": outcome.meta.get("reason"),
-                    "chars": len(outcome.latex),
-                    "seconds": outcome.meta.get("seconds"),
-                }
-            )
+            source = item["image"]
+            image = source
+            if use_crop:
+                image = preprocess.crop_to_ink(source)
+                if image.size == source.size:
+                    attempted.append(
+                        {
+                            "angle": item["angle"],
+                            "stage": stage,
+                            "status": "SKIPPED",
+                            "score": None,
+                            "reason": "crop_noop",
+                            "chars": 0,
+                            "seconds": 0.0,
+                        }
+                    )
+                    continue
+
+            outcome = self._evaluate(image, item["angle"])
+            outcome.meta["stage"] = stage
+            attempted.append(self._attempt_note(outcome, item["angle"], stage))
             if best is None or self._rank(outcome) > self._rank(best):
                 best = outcome
 
             # ① EXIF 来自相机元数据，是**结构性**信息：归正后的 0° 直接采信，
             #    绝不用其它旋转方向去覆盖它（否则低分但物理正确的方向可能压过正确结果）。
-            if exif_corrected:
+            if item.get("exif_corrected"):
                 break
             # ② 无 EXIF 时需要竞优。但**不能「一见 SUCCESS 就 break」**：
             #    实测 picture1 的 0° 输出垃圾 `\begin{matrix} \hline{} \\ \end{matrix}` 却判为 SUCCESS，
@@ -325,11 +352,59 @@ class Recognizer:
             #    因此只有「已经足够可信」才提前结束，否则继续评估其余候选方向。
             if best.status == STATUS_SUCCESS and best.confidence >= EARLY_EXIT_SCORE:
                 break
+        return best, attempted
 
-        assert best is not None  # candidates 至少有一个
+    def recognize(self, image: Image.Image, *, try_multiple_orientations: bool = True) -> RecognitionOutcome:
+        """识别一张图片，必要时在多个旋转方向上竞优。
+
+        流程（组长订正 2026-10 更新）：
+
+        1. `preprocess` 做 EXIF 归正 + 尺寸控制 + 方向候选；逐个识别、按 score 取最优。
+           图片自带可信 EXIF 时只有一个候选（0°），否则四个方向。
+        2. **低置信度回退（新增）**：若第 1 轮最好成绩 < `MIN_ACCEPTABLE_SCORE`，
+           先裁到墨迹区域再跑一轮（`preprocess.crop_to_ink`），两轮取更优。
+           动机：整页照片里公式占比小时模型容易误读，实测 12.jpg
+           全图 `'( 2-7'`(0.7831) → 裁剪后 `'1 2-7'`(0.9940)。
+        3. **数字粘连修复（新增）**：`postprocess.merge_split_digits` 合并被空白
+           拆散的数字（`4 8 6` → `486`），防止 latex2sympy2 把 `4 8` 静默算成 4×8。
+        4. 最低置信度门槛照旧：最终成绩 < 0.95 仍降级为 ERROR。
+        """
+        candidates = preprocess.prepare_candidates(
+            image, try_multiple_orientations=try_multiple_orientations
+        )
+        exif_corrected = bool(candidates and candidates[0].get("exif_corrected"))
+
+        best, attempted = self._run_pass(candidates, stage="full", use_crop=False)
+        assert best is not None  # candidates 至少有一个，且 full 轮不会跳过
+
+        # ---- 低置信度回退：墨迹裁剪重试（组长订正 2026-10）----
+        # 只在首轮低于门槛时触发；裁剪无变化的候选被跳过，所以纯背景 / 已裁紧的图
+        # 不会额外花推理。裁剪轮达到 EARLY_EXIT_SCORE 会在轮内提前结束。
+        score_before_crop = best.confidence
+        crop_info: Dict[str, Any] = {"crop_retry_used": False}
+        if best.confidence < MIN_ACCEPTABLE_SCORE:
+            crop_best, crop_attempted = self._run_pass(candidates, stage="crop", use_crop=True)
+            attempted.extend(crop_attempted)
+            improved = crop_best is not None and self._rank(crop_best) > self._rank(best)
+            crop_info = {
+                "crop_retry_used": True,
+                "crop_retry_improved": improved,
+                "score_before_crop": score_before_crop,
+            }
+            if improved:
+                best = crop_best
+
+        # ---- 数字粘连修复（组长订正 2026-10）----
+        # 放在选优之后：不影响竞优/降级判定所依赖的原始形态（长度、score）。
+        merged = postprocess.merge_split_digits(best.latex or "")
+        if merged != (best.latex or ""):
+            best.meta["digit_merge"] = True
+        best.latex = merged
+
         best.meta["attempted"] = attempted
         best.meta["candidates"] = len(candidates)
         best.meta["exif_corrected"] = exif_corrected
+        best.meta.update(crop_info)
         best.confidence = min(1.0, max(0.0, float(best.confidence)))
 
         # ---- 最低置信度门槛（用户 2026-10-06 确认采用 score ≥ 0.95）----

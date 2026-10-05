@@ -18,12 +18,12 @@ _calculator = Calculator()
 
 @router.post("/calculate", response_model=CalculateResponse)
 def calculate(request: CalculateRequest) -> CalculateResponse:
-    # mode 只允许 deg / rad
-    if request.mode not in ("deg", "rad"):
+    # mode 只允许 deg / rad / auto（auto 为组长订正新增：三角参数纯数字按角度、含 π/变量按弧度）
+    if request.mode not in ("deg", "rad", "auto"):
         return CalculateResponse(
             latex=request.latex,
             status="PARSE_ERROR",
-            message=f"无效的 mode：{request.mode}（应为 'deg' 或 'rad'）",
+            message=f"无效的 mode：{request.mode}（应为 'deg'、'rad' 或 'auto'）",
         )
 
     # 交给 Calculator，它自己保证不抛异常

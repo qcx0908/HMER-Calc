@@ -59,3 +59,29 @@
 - 现在 `uvicorn app.main:app --host 0.0.0.0 --port 8000` 会报 ImportError，因为 `recognition/router.py`、`calculation/router.py` 还没写。
 - 成员各自跑测试用「独立 FastAPI 只挂自己的 router」，不需要 main.py。
 - 等两边都交付、把 `recognition/` 和 `calculation/` 拷回这份骨架后，`main.py` 两行 import 就通，`pytest` 全绿即交付组长。
+
+## 六、组长实测可跑通环境（2026-10-05）
+
+> 模块一 + 模块二已交付并整合在 **`module_1_2/`**（不在本 `server/` 骨架里）。组长在本机已把整合版全链路跑通，环境照此复现：
+
+| 项 | 值 |
+|---|---|
+| Python | **3.12.2**（`py -3.12`；勿用 3.14——scipy 等包无可用 wheel） |
+| 虚拟环境 | 项目根 `E:\HMER-Calc\.venv`（`py -3.12 -m venv .venv` 创建） |
+| 依赖安装 | `.venv\Scripts\python -m pip install -r requirements.txt -i https://mirrors.aliyun.com/pypi/simple/` |
+| 镜像说明 | 清华源 `pypi.tuna.tsinghua.edu.cn` 本机**不可达**；改用**阿里云源**（默认 PyPI 也可用） |
+| 首次识别 | 自动从 hf-mirror 下载模型权重（约 230MB），需联网一次，之后缓存 |
+
+**启动（在 `module_1_2/` 目录下）**：
+
+```bash
+..\.venv\Scripts\python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
+```
+
+`--host 0.0.0.0` 必须带（否则手机连不上）；Windows 防火墙放行 8000。
+
+**验证结果（2026-10-05，Python 3.12.2 / CPU）**：
+
+- `pytest -q`：**51 passed**（模块一 `test_recognition` + 模块二 `test_calculation`）
+- `python selfcheck.py`：**22/22 项通过**（退出码 0）
+- 真实 HTTP 全链路：`/health` → `/recognize`（`\cos\frac{\pi}{2}+1`，置信度 0.9969）→ `/calculate`（SUCCESS，值 1.9996）

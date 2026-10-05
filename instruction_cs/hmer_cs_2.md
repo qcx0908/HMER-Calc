@@ -19,7 +19,8 @@
 
 ```
 HTTP 请求 { "latex": "\frac{1}{2}+\sqrt{9}", "mode": "deg" }
-   --> 参数校验（mode ∈ {"deg","rad"}）
+   --> 参数校验（mode ∈ {"deg","rad","auto"}，组长订正 2026-10 新增 auto）
+   --> 归一化：合并被空白拆散的数字 `4 8` → `48`（组长订正 2026-10，见 §4 兜底说明）
    --> 【C4 解析】latex2sympy2 把 LaTeX 转成 sympy 表达式
    --> 【C5 计算】sympy 求值
         ├─ 成功 --> 数值 value + valueLatex
@@ -28,7 +29,11 @@ HTTP 请求 { "latex": "\frac{1}{2}+\sqrt{9}", "mode": "deg" }
    --> 返回 JSON
 ```
 
-**角度制处理**：`mode="deg"` 时，对 `sin/cos/tan` 的参数做 `x * pi / 180` 换算后再交给 sympy（sympy 的三角默认弧度制）。
+**角度制处理**（组长订正 2026-10：扩充三角函数 + 新增 auto）：
+
+- `mode="deg"`：对 `sin/cos/tan/cot/sec/csc` 的参数做 `x * pi / 180`；对 `arcsin/arccos/arctan` 的**输出**做 `× 180 / pi`（输出按角度，如 `\arcsin(1/2)` → 30）。
+- `mode="rad"`：不做任何换算（反三角输出按弧度）。
+- `mode="auto"`：逐节点判断——三角参数是**纯数字且不含 π**（如 `\sin(30)`、`\cot(45)`）→ 按角度换算；参数含 π 或变量（如 `\sin(\pi/2)`、`\sin(x)`）→ 保持不动（按弧度）。反三角在 auto 下按弧度输出。
 
 ---
 
@@ -80,7 +85,7 @@ class RecognitionResponse(BaseModel):
 
 class CalculateRequest(BaseModel):
     latex: str
-    mode: str = "deg"            # "deg" | "rad"
+    mode: str = "deg"            # "deg" | "rad" | "auto"（组长订正 2026-10：新增 auto，默认值保持 deg 不变）
 
 class CalculateResponse(BaseModel):
     latex: str
@@ -113,7 +118,9 @@ PARENS = "()"
 | 分数 | `\frac{1}{2}` | `1/2` |
 | 幂 | `2^{3}` | `2**3` |
 | 根号 | `\sqrt{9}` | `sqrt(9)` |
-| 三角 | `\sin(30)` | `sin(30)`（deg 时换算） |
+| 三角 | `\sin(30)` | `sin(30)`（deg/auto 换算，rad 不换算） |
+| 扩充三角 | `\cot(45)` / `\sec(60)` / `\csc(30)` | `cot(45)` 等（组长订正 2026-10 新增，换算规则同 sin） |
+| 反三角 | `\arcsin(1/2)` | `asin(1/2)`（deg 输出 ×180/π → 30；rad/auto 输出弧度） |
 | π / e | `\pi` / `e` | `pi` / `E` |
 
 > latex2sympy2 本身就能解析 `\left(`、`\right)`、`\cdot`、`\mathrm`、`\over` 等常见变体，**不用手写清洗**。上表是「必须覆盖的基线」；模块 1 透传的 pix2text 原始输出若超出基线，交给 latex2sympy2 兜底解析，解析失败按 §4 返回 `PARSE_ERROR`。
@@ -127,9 +134,10 @@ PARENS = "()"
 
 ## 4. 本模块对外接口
 
-- **`POST /calculate`**：请求 `{"latex": "...", "mode": "deg"|"rad"}`，响应 `CalculateResponse`。
+- **`POST /calculate`**：请求 `{"latex": "...", "mode": "deg"|"rad"|"auto"}`，响应 `CalculateResponse`。
 - 实现封装成 `calculation/calculator.py` 里的 `Calculator`，router 只做参数校验与调用。
 - **错误处理是重点**：所有异常（解析失败、除零、未定义变量等）都要转成 `CalculateResponse`，`status` 取 `PARSE_ERROR` 或 `COMPUTE_ERROR` 并填 `message`，**绝不让接口 500 崩溃**。
+- **数字粘连兜底（组长订正 2026-10）**：解析前先合并「数字-空白-数字」（`4 8 \div6` → `48 \div6`）。这是第二道保险——模块一已在识别端修复，但 C7 修正页用户手工输入的 LaTeX 同样可能带拆散数字，而 latex2sympy2 会把 `4 8` **静默**解析成 4×8（不报错、算错）。规则与模块一 `recognition/postprocess.py` 一致，但**各持一份实现、互不 import**（模块边界：见 `hmer_cs_1.md` §3.4）。显式乘号（`4 \cdot 8` = 32）不受影响。
 - **C7 修正闭环（跨模块）**：用户修正后把新的 LaTeX 重新 POST 到本接口再算一次。修正的所见即所得编辑 UI 在模块 3（Android，见 `hmer_cs_3.md`），本模块只需保证「修正后的 LaTeX 仍能被 latex2sympy2 解析」，解析失败返回 `PARSE_ERROR` 让用户继续改。
 - 挂载点：`app/main.py` 中 `app.include_router(calculation_router)`。
 
@@ -185,7 +193,7 @@ HMER-Calc/
     │   │   └── vocab.py
     │   └── calculation/                 # 本模块实现
     │       ├── router.py                # POST /calculate
-    │       └── calculator.py            # latex2sympy2 + sympy 封装
+    │       └── calculator.py            # latex2sympy2 + sympy 封装 + 数字粘连兜底
     ├── tests/
     │   └── test_calculation.py          # 本模块独立测试
     └── requirements.txt
@@ -234,6 +242,7 @@ def test_divide_by_zero():
 1. `POST /calculate` 可被 curl 调通，返回合法 `CalculateResponse`。
 2. 能正确解析词表覆盖的所有合法输入（对照映射表逐条测试）。
 3. 任何非法输入返回 `PARSE_ERROR`/`COMPUTE_ERROR`，不 500、不崩溃。
-4. 角度制/弧度制切换生效（默认 deg）。
-5. 独立测试 `pytest tests/test_calculation.py` 通过。
+4. 角度制/弧度制/自动（auto）切换生效（后端默认 deg；Android 端默认 auto）。
+5. 被空白拆散的数字不改变语义：`4 8 \div6` → 8、`2 5+3 \times4` → 37、`\sqrt{4 8}` → √48；同时显式乘号 `4 \cdot 8` 仍为 32（防误合并）。
+6. 独立测试 `pytest tests/test_calculation.py` 通过。
 6. 对照 `ALL.md`「模块 2 查验对照单」逐项自查。

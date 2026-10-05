@@ -24,6 +24,7 @@
 - [ ] JSON 字段一律 snake_case（`value_latex`、`range_start`），Android 用 `@SerialName` 映射
 - [ ] 两个响应都带 `status`+`message`（识别 SUCCESS/ERROR；计算 SUCCESS/PARSE_ERROR/COMPUTE_ERROR）；业务错误返回 200 + `status`，仅请求体格式错误返回 4xx
 - [ ] LaTeX 词表仅供报告参考、不作为过滤规则：识别输出原样透传 pix2text，计算端靠 latex2sympy2 兜底解析
+  - 例外（组长订正 2026-10）：数字粘连会被**修复**（`4 8 6`→`486`）——它是模型解码错误而非合法 LaTeX 变体，且会让 latex2sympy2 **静默算错**（`4 8`→4×8）。模块一在识别端合并（`recognition/postprocess.py`），模块二在解析前兜底再合并一次（`calculation/calculator.py`，两份实现互不 import）。见 M1-8 / M2-13。
 
 ### 契约基准（金标准，查验时对照）
 
@@ -51,7 +52,7 @@ class RecognitionResponse(BaseModel):
 
 class CalculateRequest(BaseModel):
     latex: str
-    mode: str = "deg"              # "deg" | "rad"
+    mode: str = "deg"              # "deg" | "rad" | "auto"（组长订正 2026-10 新增 auto；默认值保持 deg 不变）
 
 class CalculateResponse(BaseModel):
     latex: str
@@ -71,7 +72,7 @@ class CalculateResponse(BaseModel):
 @Serializable data class RecognitionResponse(val latex: String, val confidence: Double,
     val tokens: List<Token> = emptyList(), val status: String = "SUCCESS",
     val message: String? = null)
-@Serializable data class CalculateRequest(val latex: String, val mode: String = "deg")
+@Serializable data class CalculateRequest(val latex: String, val mode: String = "auto")  // 组长订正 2026-10：客户端默认 auto
 @Serializable data class CalculateResponse(val latex: String, val value: Double? = null,
     @SerialName("value_latex") val valueLatex: String? = null,
     val status: String, val message: String? = null)
@@ -90,6 +91,7 @@ class CalculateResponse(BaseModel):
 | M1-5 | 独立测试通过 | `pytest tests/test_recognition.py` 全绿 | ☐ |
 | M1-6 | 不依赖模块 2 | 只挂 recognition router 也能启动并测通 | ☐ |
 | M1-7 | 预留字段未删 | `tokens`/`alternatives`/`range_*` 保留；Pix2Text 无 token 级输出，`tokens` 恒为空 `[]`（E3 放弃、E8 降级为整体置信度拦截） | ☐ |
+| M1-8 | 多位数不被拆散（组长订正 2026-10 新增） | `pytest tests/test_recognition.py -k two_digit` 全绿；回归素材 `photo_12/25/48.jpg` 期望输出 `12-7` / `25+3 \times4` / `48 \div6`（12.jpg 另验证裁剪重试：全图 0.7831 → 裁剪 0.9960） | ☐ |
 
 ---
 
@@ -107,6 +109,9 @@ class CalculateResponse(BaseModel):
 | M2-8 | 非法输入不 500 | 除零、括号不匹配 → 返回 `PARSE_ERROR`/`COMPUTE_ERROR` + message | ☐ |
 | M2-9 | 独立测试通过 | `pytest tests/test_calculation.py` 全绿 | ☐ |
 | M2-10 | 不依赖模块 1 | 只挂 calculation router 也能启动并测通 | ☐ |
+| M2-11 | auto 模式（组长订正 2026-10 新增） | `mode="auto"`：`\sin(30)`→0.5、`\cos(\pi/2)+1`→1.0、`\cot(45)`→1 | ☐ |
+| M2-12 | 扩充三角函数（组长订正 2026-10 新增） | `mode="deg"`：`\cot(45)`→1、`\sec(60)`→2、`\arcsin(1/2)`→30；`mode="rad"`：`\arcsin(1/2)`→π/6 | ☐ |
+| M2-13 | 数字粘连兜底（组长订正 2026-10 新增） | `4 8 \div6`→8、`2 5+3 \times4`→37、`\sqrt{4 8}`→√48；反例：`4 \cdot 8` 仍为 32（不得误合并） | ☐ |
 
 ---
 
@@ -122,7 +127,7 @@ class CalculateResponse(BaseModel):
 | M3-6 | UI 只依赖接口 | 可注入替换 `Local`/`Remote` 实现 | ☐ |
 | M3-7 | LaTeX 渲染正常 | jlatexmath 显示公式 | ☐ |
 | M3-8 | 明文 HTTP 已配置 | `usesCleartextTraffic` 或 network config | ☐ |
-| M3-9 | 后端地址可配置 | 能切换模拟器/真机热点地址 | ☐ |
+| M3-9 | 后端地址可配置 | 能切换模拟器/真机热点地址（组长订正 2026-10：模拟器阶段 UI 只读展示、不给输入；切换能力保留在 SettingsStore+拦截器，真机验收前恢复 UI 编辑） | ☐ |
 
 ---
 
@@ -150,7 +155,7 @@ class CalculateResponse(BaseModel):
 2. `/recognize` 或 `/calculate` 遇非法输入返回 500 崩溃（必须返回结果对象）。
 3. 识别失败没走 `status="ERROR"` + `message` 通道（空 `latex` 冒充成功、或 500 崩溃）。
 4. Android 端没走 `common` 接口、把 `RemoteRecognizer`/`RemoteCalculator` 具体类硬编码进 UI（日后无法换端侧实现）。
-5. 后端地址写死、不可配置，导致换真机/模拟器时无法切换。
+5. 后端地址写死、不可配置，导致换真机/模拟器时无法切换（组长订正 2026-10：模拟器阶段 UI 只读展示属有计划简化、底层切换能力保留，不视为违反；真机阶段须恢复 UI 编辑）。
 
 ---
 

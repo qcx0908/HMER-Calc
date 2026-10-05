@@ -22,6 +22,8 @@ HTTP 请求 { "image": "<base64>" }
    --> 【C2 预处理】EXIF 方向归正 + 尺寸控制（最长边 ≤1600）--> 生成方向候选（无 EXIF 时 0/90/180/270°）
    --> 【C3 识别】pix2text（MFR 模型）逐方向推理 --> 每条 LaTeX + score
    --> 多方向竞优取最优（≤2 字符退化输出降级）
+   --> 低置信度回退：首轮 < 0.95 时裁到墨迹区域再试一轮，两轮取优（组长订正 2026-10）
+   --> 数字粘连修复：合并被空白拆散的数字 `4 8 6` → `486`（组长订正 2026-10）
    --> 多行/多公式检测（array/matrix/cases 等 → ERROR）
    --> 低置信度门槛（score < 0.95 → ERROR 让用户确认）
    --> 封装为 RecognitionResponse(latex, confidence, tokens=[]) + X-Recognition-Meta 诊断头
@@ -49,12 +51,14 @@ HTTP 请求 { "image": "<base64>" }
 
 > **为什么是 pix2text 而不是 pix2tex**：输入是纯手写公式。pix2tex（LaTeX-OCR）默认权重偏印刷体（im2latex 数据），对手写体准确率明显下降；pix2text（P2T）的 MFR 数学公式识别模型已用手写数据重训，对手写体更友好。代价是 pix2text 更重（cnocr/cnstd/onnxruntime）且**不输出 token 级信息**（见下面第 3 条）。
 
-以下四个语义是模块 1 实际实现里对契约最小集的加固，接口字段不变，只影响返回行为：
+以下六个语义是模块 1 实际实现里对契约最小集的加固，接口字段不变，只影响返回行为：
 
 1. **EXIF 方向归正 + 多方向竞优**：图片带可信 EXIF 时归正后只认 0°；无 EXIF 时在 0/90/180/270° 各识别一遍，按 score 取最优。对 ≤2 字符的退化输出（如 `\begin{matrix}\hline{}\\` 这类垃圾）降级，避免它压过正确结果。
 2. **多行/多公式检测**：识别出 `array`/`matrix`/`cases`/`aligned` 等多行环境且含 ≥2 处换行时，判定为多公式，返回 `status="ERROR"`（当前仅支持单一公式 C3，多公式 E7 未实现）。
 3. **低置信度门槛（score ≥ 0.95）**：最高分候选 < 0.95 时不输出结果，改 `status="ERROR"` + message，把决定权交回用户（对应 C7 闭环）。实测依据：正确样本 0.9568~1.0，错误样本 0.8977~0.9445。
 4. **`X-Recognition-Meta` 诊断头**：各方向 `angle`/`status`/`score`/`reason`/`seconds` 等诊断信息放 HTTP 响应头，不进入 JSON 契约体。
+5. **数字粘连修复（组长订正 2026-10）**：MFR 解码器会把间隔偏大的相邻数字当两个 token 输出（手写 `486` → `4 8 6`，且 score 可达 1.0，门槛拦不住），而 latex2sympy2 会把 `4 8` **静默**算成 4×8。`postprocess.merge_split_digits` 在竞优选出结果后合并「数字-空白-数字」形态（`4 8 6`→`486`、`2 5+3 \times4`→`25+3 \times4`），显式运算符（`\cdot`/`\times`）一律不动。实测样本：12/25/48 三张照片修复后输出 `12-7` / `25+3 \times4` / `48 \div6`。
+6. **低置信度墨迹裁剪重试（组长订正 2026-10）**：首轮最高分 < 0.95 时，把候选图裁到墨迹包围盒（+5% 留白）再跑一轮，两轮取优；裁剪无变化的候选直接跳过（好图零额外开销）。动机：整页照片里公式占比小时模型易误读——实测 `12.jpg` 全图 0° 输出 `'( 2-7'`（0.7831），裁剪后 `'1 2-7'`（**0.9960**，先合并为 `12-7` 再过关）。裁剪只做几何裁切、不改像素值（§3.4 铁律 1 的唯一例外）。
 
 ---
 
@@ -92,7 +96,7 @@ class RecognitionResponse(BaseModel):
 
 class CalculateRequest(BaseModel):
     latex: str
-    mode: str = "deg"            # "deg" | "rad"
+    mode: str = "deg"            # "deg" | "rad" | "auto"（组长订正 2026-10：新增 auto，语义见 hmer_cs_2.md §1）
 
 class CalculateResponse(BaseModel):
     latex: str
@@ -118,10 +122,13 @@ PARENS = "()"
 ```
 
 > 本模块识别输出**原样透传** pix2text 的结果，**不做词表过滤、不做规范化**。pix2text 可能输出 `\left(`、`\right)`、`\cdot`、`\over`、`\mathrm` 等变体，全部原样放进 `latex` 字段，由模块 2（latex2sympy2）兜底解析。上面词表只用于报告里说明支持范围。
+>
+> ⚠️ **组长订正 2026-10 的唯一例外**：`\left(`/`\over` 等变体仍原样透传，但「数字被空白拆散」（`4 8 6`）会做**合并修复**（§2.1 第 5 条）——因为它是**模型解码错误**而非合法变体，且下游 latex2sympy2 会把它**静默算错**（`4 8` → 4×8）。除此之外不得增加任何过滤/规范化。
 
 ### 3.4 两条铁律
 
 1. 识别输出原样透传 pix2text 结果，不做词表过滤、不做结构规范化（`\left(`、`\over` 等变体也原样传）。
+   **例外（组长订正 2026-10）**：数字粘连修复（§2.1 第 5 条）与低置信度墨迹裁剪重试（§2.1 第 6 条，仅几何裁切、不改像素值）。两者都有实测回归测试（`tests/test_recognition.py` 末节）。
 2. 改 `common/models.py` 的字段，必须同步通知模块 2 与模块 3。
 
 ---
@@ -190,8 +197,9 @@ HMER-Calc/
     │   │   └── vocab.py                 # 词表
     │   └── recognition/                 # 本模块实现
     │       ├── router.py                # POST /recognize
-    │       ├── recognizer.py            # pix2text 封装
-    │       └── preprocess.py            # base64→PIL + 可选裁剪
+    │       ├── recognizer.py            # pix2text 封装 + 两轮竞优（含裁剪重试）
+    │       ├── preprocess.py            # base64→PIL + 方向候选 + crop_to_ink 墨迹裁剪
+    │       └── postprocess.py           # 数字粘连修复 merge_split_digits（组长订正 2026-10）
     ├── tests/
     │   ├── fixtures/                    # 测试图片
     │   └── test_recognition.py          # 本模块独立测试
@@ -235,7 +243,8 @@ def test_recognize_bad_image_returns_error():
 ## 10. 交付物与验收要点
 
 1. `POST /recognize` 可被 curl 调通，返回合法 `RecognitionResponse`。
-2. 输出 `latex` 为 pix2text 原始输出（原样透传，含 `\left` 等变体也接受），`confidence` ∈ [0,1]。
+2. 输出 `latex` 为 pix2text 原始输出（原样透传，含 `\left` 等变体也接受；数字粘连已按 §2.1 第 5 条修复），`confidence` ∈ [0,1]。
 3. `confidence` ∈ [0,1]。
 4. 独立测试 `pytest tests/test_recognition.py` 通过。
-5. 对照 `ALL.md`「模块 1 查验对照单」逐项自查。
+5. 三位数内识别正确：两位数不得被空白拆散（回归素材 `tests/fixtures/photo_12.jpg` / `photo_25.jpg` / `photo_48.jpg`，期望输出 `12-7` / `25+3 \times4` / `48 \div6`）。
+6. 对照 `ALL.md`「模块 1 查验对照单」逐项自查。

@@ -53,15 +53,19 @@ pip install pix2text -i https://pypi.tuna.tsinghua.edu.cn/simple
 
 ```bash
 cd <交付文件夹>
-pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
-pip install pix2text -i https://pypi.tuna.tsinghua.edu.cn/simple   # 见 §0
+pip install -r requirements.txt -i https://mirrors.aliyun.com/pypi/simple/
 ```
+
+> **【组长实测 2026-10-05】** 清华源 `pypi.tuna.tsinghua.edu.cn` 本机**不可达**，改用**阿里云源**（默认 PyPI 也可用）。
+> `requirements.txt` 已含 `pix2text`（§0 的临时补装命令作废），直接 `pip install -r requirements.txt` 即可。
 
 Python 要求 **3.10+**（开发与验证环境为 **3.12.2**）。
 
 ---
 
 ## 2. 怎么启动
+
+> **【组长回执 2026-10-05 · 本条作废】** 模块二已交付并整合进本 `module_1_2/`，直接用 **§2.2 组长入口**启动即可（全链路已实测跑通：51 tests + 22/22 自检 + HTTP 识别→计算）。§2.1 的临时入口 `tmp_app.py` 仅作历史说明。
 
 **⚠️ 重要：模块二（`app/calculation/`）尚未交付，所以现在还不能用组长入口启动。**
 
@@ -141,13 +145,20 @@ curl -X POST http://127.0.0.1:8000/recognize -H "Content-Type: application/json"
 {"latex":"\\cos\\frac{\\pi} {2}+1","confidence":0.9969229102134705,"tokens":[],"status":"SUCCESS","message":null}
 ```
 
-### 3.3 `POST /calculate`（**模块二，尚未交付**）
-
-模块二交付后按 `hmer_cs_2.md` 补此节；预期形如：
+### 3.3 `POST /calculate`（**模块二，已交付，2026-10-05 实测**）
 
 ```bash
-curl -X POST http://127.0.0.1:8000/calculate -H "Content-Type: application/json" -d "{\"latex\":\"1+2*3\",\"mode\":\"deg\"}"
+curl -X POST http://127.0.0.1:8000/calculate -H "Content-Type: application/json" -d "{\"latex\":\"\\sin(30)\",\"mode\":\"deg\"}"
 ```
+
+实测返回（HTTP 200，deg 模式）：
+
+```json
+{"latex":"\\sin(30)","value":0.5,"value_latex":"\\frac{1}{2}","status":"SUCCESS","message":null}
+```
+
+`status` 取值 `SUCCESS | PARSE_ERROR | COMPUTE_ERROR`；`value` 为数值结果、`value_latex` 为结果的 LaTeX。
+详细实现与边界见 `info2/模块二说明.md`（成员 2）。
 
 ### 3.4 错误场景（验证"业务错误不 500"）
 

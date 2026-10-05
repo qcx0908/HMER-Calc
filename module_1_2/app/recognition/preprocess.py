@@ -2,9 +2,11 @@
 """模块一：图像解码与可选预处理（C2）。
 
 职责边界（见 hmer_cs_1.md 铁律 1）：
-- 只做「Base64 → PIL」与「方向候选生成」。
+- 只做「Base64 → PIL」、「方向候选生成」与「墨迹裁剪（低置信度重试用，组长订正 2026-10）」。
 - **不做**二值化/去噪/锐化等像素级增强：Pix2Text 自带缩放与归一化，额外处理会降低识别率。
-- **不改写**模型输出的 LaTeX。
+  （组长订正 2026-10：唯一例外是 `crop_to_ink` 的**几何裁剪**——只裁掉空白背景、
+  不做任何像素值层面的变换，实测能救回「整页照片中公式占比小」的低置信度样本。）
+- **不改写**模型输出的 LaTeX（数字粘连修复在 recognizer/postprocess.py，不在这里）。
 
 方向说明（P0 实测得出，2026-10-06）：
 - `picture3.jpg` 的 EXIF orientation = 8，不做 `exif_transpose` 时 Pix2Text 输出垃圾；
@@ -24,12 +26,26 @@ from PIL import Image, ImageOps
 #: 模型输入像素上限（最长边）。Pix2Text 内部会自行缩放，这里只防超大图拖慢推理。
 MAX_SIDE = 1600
 
+# ---- 墨迹裁剪参数（组长订正 2026-10，实测标定见 crop_to_ink） ----
+#: 灰度低于「背景中位数 - 该值」视为墨迹
+INK_DELTA = 40
+#: 四周留白 = 长边的该比例（12.jpg 实测：0.05 × 1600 = 80px 时 score 0.7831 → 0.9940）
+INK_PAD_RATIO = 0.05
+#: 最小留白像素，防小图裁得太紧
+INK_MIN_PAD = 20
+#: 墨迹框覆盖超过整图该比例时视为「没裁到东西」，原样返回（调用方跳过重试）
+INK_MAX_COVER = 0.95
+
 #: re-export，便于测试与调用方复用同一套异常类型
 ImageDecodeError = ValueError
 
 __all__ = [
     "ImageDecodeError",
     "MAX_SIDE",
+    "INK_DELTA",
+    "INK_PAD_RATIO",
+    "INK_MIN_PAD",
+    "INK_MAX_COVER",
     "decode_base64_image",
     "encode_image_to_base64",
     "normalize_orientation",
@@ -37,6 +53,7 @@ __all__ = [
     "exif_rotation_is_trustworthy",
     "generate_orientation_candidates",
     "downscale_for_model",
+    "crop_to_ink",
     "prepare_candidates",
     "to_png_bytes",
     "to_base64_png",
@@ -168,6 +185,76 @@ def downscale_for_model(image: Image.Image, max_side: int = MAX_SIDE) -> Image.I
     scale = max_side / float(longest)
     new_size = (max(1, int(round(width * scale))), max(1, int(round(height * scale))))
     return image.resize(new_size, Image.LANCZOS)
+
+
+def crop_to_ink(
+    image: Image.Image,
+    *,
+    pad_ratio: float = INK_PAD_RATIO,
+    min_pad: int = INK_MIN_PAD,
+    ink_delta: int = INK_DELTA,
+    max_cover: float = INK_MAX_COVER,
+) -> Image.Image:
+    """裁剪到「墨迹包围盒 + 留白」（低置信度重试用，组长订正 2026-10）。
+
+    动机（2026-10-05 实测）：整页照片里公式只占小区域时，模型会把空格/噪声
+    当上下文，容易误读（`12.jpg` 全图 0° 输出 `'( 2-7'`，score 0.7831；
+    裁到墨迹后输出 `'1 2-7'`，score **0.9940** —— 「1」不再被读成「(」）。
+
+    保守策略（任何一条不满足就原样返回，调用方据此跳过重试）：
+    - 找不到墨迹（纯背景图）；
+    - 墨迹框覆盖 ≥ `max_cover` 的整图面积（没裁到东西）；
+    - 裁剪结果与原图同尺寸。
+
+    极性问题（组长订正 2026-10）：主体是「深色墨迹 / 浅色背景」（纸面书写），
+    因此只找比背景**暗**的像素；仅当整幅都找不到暗像素时，才反过来找比背景**亮**
+    的像素（黑板 + 粉笔字这类反色场景）。正常纸面照片永远走不到这一步，路径不受影响。
+
+    实现只做**几何裁剪**：背景亮度取灰度中位数（亮/暗照片都能自适应），
+    不做二值化以外的像素值变换（Pix2Text 自带归一化，多改反而伤识别率）。
+    """
+    gray = image.convert("L")
+    width, height = gray.size
+    if width <= 2 or height <= 2:
+        return image
+
+    # 背景亮度 ≈ 灰度中位数：整体偏亮或偏暗的照片都能自适应
+    histogram = gray.histogram()
+    total = sum(histogram)
+    cumulative = 0
+    background = 255
+    for value, count in enumerate(histogram):
+        cumulative += count
+        if cumulative * 2 >= total:
+            background = value
+            break
+
+    dark_threshold = max(0, background - ink_delta)
+    mask = gray.point(lambda v: 255 if v < dark_threshold else 0)
+    bbox = mask.getbbox()
+    if bbox is None:
+        # 深底浅字（如黑板照）：全图没有比背景暗的像素，反向找比背景亮的像素
+        light_threshold = min(255, background + ink_delta)
+        mask = gray.point(lambda v: 255 if v > light_threshold else 0)
+        bbox = mask.getbbox()
+    if bbox is None:
+        return image  # 没有墨迹，没什么可裁
+
+    left, top, right, bottom = bbox
+    if (right - left) * (bottom - top) >= max_cover * width * height:
+        return image  # 墨迹几乎铺满全图，裁剪无意义
+
+    pad = max(min_pad, int(round(pad_ratio * max(width, height))))
+    box = (
+        max(0, left - pad),
+        max(0, top - pad),
+        min(width, right + pad),
+        min(height, bottom + pad),
+    )
+    cropped = image.crop(box)
+    if cropped.size == image.size:
+        return image
+    return cropped
 
 
 def generate_orientation_candidates(image: Image.Image, angles: Tuple[int, ...] = (0, 90, 180, 270)) -> List[Dict]:

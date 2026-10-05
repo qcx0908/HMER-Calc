@@ -30,7 +30,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from PIL import Image
 
-from app.recognition import preprocess, router as router_module
+from app.recognition import postprocess, preprocess, router as router_module
 from app.recognition.recognizer import (
     EARLY_EXIT_SCORE,
     MIN_ACCEPTABLE_SCORE,
@@ -441,3 +441,174 @@ def test_normalize_orientation_is_noop_without_exif():
     """没有 EXIF 的图片不应被改动。"""
     image = Image.new("RGB", (7, 5), "white")
     assert preprocess.normalize_orientation(image).size == (7, 5)
+
+
+# ======================================================================================
+# 组长订正 2026-10：数字粘连修复（postprocess）+ 低置信度墨迹裁剪重试（crop_to_ink）
+# ======================================================================================
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        # 实测复现：MFR 解码器把间隔偏大的数字拆成多个 token（score 1.0，门槛拦不住）
+        (r"4 8 6", r"486"),
+        (r"2 5+3 \times4", r"25+3 \times4"),
+        (r"4 8 \div6", r"48 \div6"),
+        # 各类「空白类」间隔都要合并
+        (r"4\,8", r"48"),
+        (r"4\;8", r"48"),
+        (r"4\ 8", r"48"),
+        (r"4~8", r"48"),
+        (r"4\quad 8", r"48"),
+        # 显式乘号不能动：`4 \cdot 8` 就是 4×8，合并会改错
+        (r"4 \cdot 8", r"4 \cdot 8"),
+        (r"4 \times 8", r"4 \times 8"),
+        # 非数字相邻、花括号相隔的内容不受影响
+        (r"\frac{1}{2} 3", r"\frac{1}{2} 3"),
+        (r"x 2", r"x 2"),
+        ("", ""),
+    ],
+)
+def test_merge_split_digits(raw, expected):
+    """数字粘连修复规则：只合并「数字-空白-数字」，显式运算符一律不动。"""
+    assert postprocess.merge_split_digits(raw) == expected
+
+
+def test_merge_split_digits_is_idempotent():
+    """幂等：合并结果再喂一遍必须不变（调用方可能重复经过两道修复）。"""
+    once = postprocess.merge_split_digits(r"4 8 6 \div1 2")
+    assert once == r"486 \div12"
+    assert postprocess.merge_split_digits(once) == once
+
+
+def test_crop_to_ink_trims_background():
+    """有明确墨迹时应裁掉空白背景，且四周保留 >= min_pad 的留白。"""
+    image = Image.new("RGB", (200, 200), "white")
+    for x in range(90, 110):
+        for y in range(95, 105):
+            image.putpixel((x, y), (0, 0, 0))
+
+    cropped = preprocess.crop_to_ink(image, min_pad=10)
+    assert cropped.size != image.size
+    assert cropped.size[0] < 200 and cropped.size[1] < 200
+    # 墨迹区域（10px 宽）必须完整包含在裁剪结果里；尺寸 = 墨迹 + 两侧留白
+    assert cropped.size[0] >= 20 + 2 * 10
+    assert cropped.size[1] >= 10 + 2 * 10
+
+
+def test_crop_to_ink_is_noop_for_blank_image():
+    """纯背景（找不到墨迹）应原样返回 —— 调用方据此跳过重试。"""
+    image = Image.new("RGB", (120, 80), "white")
+    assert preprocess.crop_to_ink(image).size == (120, 80)
+
+
+def test_crop_to_ink_is_noop_when_ink_covers_page():
+    """墨迹几乎铺满整图（>= max_cover）时不裁，避免白跑一轮推理。"""
+    image = Image.new("RGB", (100, 100), "white")
+    image.paste((0, 0, 0), (2, 2, 98, 98))  # 覆盖 96% >= 95%
+    assert preprocess.crop_to_ink(image).size == (100, 100)
+
+
+def test_crop_to_ink_adapts_to_dark_background():
+    """深底浅字（黑板照）也要能裁剪：全图无「比背景暗」的像素时反向找亮像素。"""
+
+    image = Image.new("RGB", (200, 200), (20, 20, 20))
+    image.paste((240, 240, 240), (90, 95, 110, 105))
+    cropped = preprocess.crop_to_ink(image, min_pad=10)
+    assert cropped.size != image.size
+
+
+class _CropAwareEngine:
+    """假引擎：裁剪过的图（面积变小）返回正确结果，否则返回拆散数字 + 低分。
+
+    用来在**不加载真实模型**的情况下验证「低置信度 → 裁剪重试 → 取更优」这条链路。
+    """
+
+    def __init__(self, full_area: int):
+        self._full_area = full_area
+
+    def recognize_formula(self, image, return_text: bool = False):
+        area = image.size[0] * image.size[1]
+        if area < self._full_area:
+            return {"text": r"4 8 \div6", "score": 0.99}
+        return {"text": r"4 8 \div6", "score": 0.80}
+
+
+def test_low_confidence_triggers_crop_retry():
+    """低置信度时自动跑裁剪轮，并采用更优结果（含数字粘连修复）。
+
+    这里用一个方块图 + 假引擎，不依赖真实模型：
+    - 全图 → 0.80（< 0.95，触发裁剪重试）
+    - 裁剪后 → 0.99（>= 0.95，轮内提前结束）
+    """
+    image = Image.new("RGB", (200, 200), "white")
+    image.paste((0, 0, 0), (90, 95, 110, 105))
+
+    recognizer = Recognizer(engine=_CropAwareEngine(full_area=200 * 200))
+    outcome = recognizer.recognize(image)
+
+    assert outcome.status == STATUS_SUCCESS
+    assert outcome.latex == r"48 \div6"  # 数字粘连已修复
+    assert outcome.meta["digit_merge"] is True
+    assert outcome.meta["crop_retry_used"] is True
+    assert outcome.meta["crop_retry_improved"] is True
+    assert outcome.meta["score_before_crop"] < MIN_ACCEPTABLE_SCORE
+    assert outcome.confidence >= MIN_ACCEPTABLE_SCORE
+
+    stages = {item["stage"] for item in outcome.meta["attempted"]}
+    assert stages == {"full", "crop"}
+
+
+def test_no_crop_retry_when_confidence_is_high():
+    """首轮成绩已达标时不跑裁剪轮（好图零额外开销）。"""
+    image = Image.new("RGB", (200, 200), "white")
+    image.paste((0, 0, 0), (90, 95, 110, 105))
+
+    class _GoodEngine:
+        def recognize_formula(self, image, return_text: bool = False):
+            return {"text": r"1+2 \times3", "score": 0.99}
+
+    outcome = Recognizer(engine=_GoodEngine()).recognize(image)
+    assert outcome.status == STATUS_SUCCESS
+    assert outcome.meta["crop_retry_used"] is False
+    assert {item["stage"] for item in outcome.meta["attempted"]} == {"full"}
+
+
+#: 用户 2026-10-05 提供的三张回归照片（原文件在 E:\\HMER-Calc\\error\\）：
+#:   12.jpg = 「12-7」、25.jpg = 「25+3x4」、48.jpg = 「48÷6」
+#: 期望值为 2026-10-05 在本机实测（Pix2Text 1.1.7 / CPU）后的真实输出。
+SPLIT_PHOTOS = [
+    ("photo_12.jpg", "12-7"),        # 必须靠裁剪重试救回（全图 0.7831 → 裁剪 0.9960）
+    ("photo_25.jpg", r"25+3 \times4"),  # 首轮即达标（0.9986），不触发裁剪
+    ("photo_48.jpg", r"48 \div6"),      # 首轮即达标（0.9994），不触发裁剪
+]
+
+
+@pytest.mark.parametrize("filename, expected_latex", SPLIT_PHOTOS)
+def test_two_digit_photos_regression(filename, expected_latex):
+    """两位数识别回归：数字不得被空白拆散（`48` 不能变成 `4 8`）。
+
+    修复前实测：这些照片输出 `4 8 \\div6` 之类，latex2sympy2 会**静默**算成 4×8÷6。
+    """
+    path = FIXTURES / filename
+    assert path.exists(), f"缺少回归素材：{path}"
+
+    outcome = Recognizer().recognize(preprocess.decode_base64_image(_b64_of(path)))
+
+    assert outcome.status == STATUS_SUCCESS, outcome.message
+    assert outcome.latex == expected_latex
+    assert outcome.confidence >= MIN_ACCEPTABLE_SCORE
+    # 幂等即证明修复已生效（输出里不再有拆散的数字）
+    assert postprocess.merge_split_digits(outcome.latex) == outcome.latex
+
+
+def test_two_digit_photo_12_needed_crop_retry():
+    """12.jpg 是「裁剪重试」的动机样本：全图误读、裁剪后置信度跳升。"""
+    path = FIXTURES / "photo_12.jpg"
+    assert path.exists(), f"缺少回归素材：{path}"
+
+    outcome = Recognizer().recognize(preprocess.decode_base64_image(_b64_of(path)))
+
+    assert outcome.meta["crop_retry_used"] is True
+    assert outcome.meta["crop_retry_improved"] is True
+    assert outcome.meta["score_before_crop"] < MIN_ACCEPTABLE_SCORE
+    assert outcome.confidence >= MIN_ACCEPTABLE_SCORE
