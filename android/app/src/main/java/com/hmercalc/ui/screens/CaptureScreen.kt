@@ -16,14 +16,18 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -32,6 +36,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
@@ -47,6 +52,7 @@ fun CaptureScreen(
     onImageUri: (Uri) -> Unit,
     onRetry: () -> Unit,
     onBaseUrlChanged: (String) -> Unit,
+    onOpenHistory: () -> Unit,
 ) {
     val context = LocalContext.current
     var pendingCameraUri by remember { mutableStateOf<Uri?>(null) }
@@ -95,30 +101,45 @@ fun CaptureScreen(
         ) {
             // 标题（组长订正 2026-10-07）：固定两行排版——"HMER-Calc" 一行、"手写公式识别计算系统"
             // 第二行；统一 titleLarge 字号，两行在 360dp 窄屏均能单行放下、不折行。
-            Text(
-                "HMER-Calc\n手写公式识别计算系统",
-                style = MaterialTheme.typography.titleLarge,
+            // 历史记录入口放标题右侧，形成「标题 + 动作」的顶栏层次。
+            Row(
                 modifier = Modifier.fillMaxWidth(),
-            )
-
-            // 图片预览
-            val bitmap = state.imageBitmap
-            if (bitmap != null) {
-                Image(
-                    bitmap = bitmap.asImageBitmap(),
-                    contentDescription = "手写公式",
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(240.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    "HMER-Calc\n手写公式识别计算系统",
+                    style = MaterialTheme.typography.titleLarge,
+                    modifier = Modifier.weight(1f),
                 )
-            } else {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(240.dp),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Text("暂无图片，点下方「拍照」或「从相册选图」开始", color = MaterialTheme.colorScheme.outline)
+                TextButton(onClick = onOpenHistory) { Text("历史记录") }
+            }
+
+            // 图片预览（卡片承载，圆角 + 浅底，占位与实图视觉一致）
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+            ) {
+                val bitmap = state.imageBitmap
+                if (bitmap != null) {
+                    Image(
+                        bitmap = bitmap.asImageBitmap(),
+                        contentDescription = "手写公式",
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(240.dp)
+                            .padding(8.dp),
+                        contentScale = ContentScale.Fit,
+                    )
+                } else {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(240.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text("暂无图片，点下方「拍照」或「从相册选图」开始", color = MaterialTheme.colorScheme.outline)
+                    }
                 }
             }
 

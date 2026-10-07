@@ -2,6 +2,7 @@ package com.hmercalc.ui
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -9,6 +10,8 @@ import com.hmercalc.common.BitmapUtils
 import com.hmercalc.common.Calculator
 import com.hmercalc.common.Modes
 import com.hmercalc.common.Recognizer
+import com.hmercalc.data.HistoryEntry
+import com.hmercalc.data.HistoryStore
 import com.hmercalc.data.SettingsStore
 import com.hmercalc.remote.BackendUrlHolder
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -26,7 +29,7 @@ import javax.inject.Inject
 //   IDLE ─选图─▶ IMAGE_LOADED ─识别成功(自动初算)─▶ RESULT ⇄（correcting 子态：修正公式）
 //   识别/读图失败 ─▶ ERROR（留在选图页，可重试）
 // 修正模式的进出全部由用户显式按钮驱动；清空输入框不会退出修正（组长订正第 6 条）。
-enum class Phase { IDLE, IMAGE_LOADED, RESULT, ERROR }
+enum class Phase { IDLE, IMAGE_LOADED, RESULT, ERROR, HISTORY }
 
 // 进入修正前的快照：退出修正时整体恢复，保证「公式↔数值」始终一致
 data class ResultSnapshot(
@@ -52,6 +55,8 @@ data class UiState(
     val correcting: Boolean = false,
     val snapshot: ResultSnapshot? = null,
     val lastInsertRange: IntRange? = null, // 最近一次点选插入的区间（输入框内变色高亮）
+    // —— 历史记录 ——
+    val history: List<HistoryEntry> = emptyList(),
 )
 
 @HiltViewModel
@@ -59,11 +64,15 @@ class CalcViewModel @Inject constructor(
     private val recognizer: Recognizer,
     private val calculator: Calculator,
     private val settingsStore: SettingsStore,
+    private val historyStore: HistoryStore,
     @ApplicationContext private val appContext: Context,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(UiState())
     val uiState: StateFlow<UiState> = _uiState.asStateFlow()
+
+    // 历史记录：识别成功时暂存图片，初算完成后写入一条（修正/切换模式的重算不新增记录）
+    private var pendingHistoryBitmap: Bitmap? = null
 
     init {
         // 后端地址持久化 → 同步到运行期拦截器 + UI（UI 可编辑，见 setBaseUrl）
@@ -71,6 +80,12 @@ class CalcViewModel @Inject constructor(
             settingsStore.baseUrlFlow.collect { url ->
                 BackendUrlHolder.baseUrl = url
                 _uiState.update { it.copy(baseUrl = url) }
+            }
+        }
+        // 历史记录列表 → UI（写入/清空后自动刷新）
+        viewModelScope.launch {
+            historyStore.entriesFlow.collect { entries ->
+                _uiState.update { it.copy(history = entries) }
             }
         }
     }
@@ -131,6 +146,7 @@ class CalcViewModel @Inject constructor(
             val resp = recognizer.recognize(bitmap)
             if (resp.status == "SUCCESS") {
                 // 识别成功 → 直接进结果页，并自动先算一次（组长订正第 5 条：先给计算值，由用户判断对错）
+                pendingHistoryBitmap = bitmap
                 _uiState.update {
                     it.copy(
                         phase = Phase.RESULT,
@@ -177,8 +193,10 @@ class CalcViewModel @Inject constructor(
                         loading = false,
                     )
                 }
+                maybeRecordHistory()
             } catch (e: Exception) {
                 _uiState.update { it.copy(loading = false, message = "网络或服务异常：${e.message}") }
+                maybeRecordHistory()
             }
         }
     }
@@ -235,6 +253,59 @@ class CalcViewModel @Inject constructor(
     }
 
     fun reset() {
-        _uiState.update { UiState(baseUrl = it.baseUrl, mode = it.mode) }
+        _uiState.update { UiState(baseUrl = it.baseUrl, mode = it.mode, history = it.history) }
+    }
+
+    // ---------------- 历史记录 ----------------
+
+    /** 打开历史记录列表页 */
+    fun openHistory() {
+        _uiState.update { it.copy(phase = Phase.HISTORY) }
+    }
+
+    /** 从历史列表返回首页 */
+    fun closeHistory() {
+        _uiState.update { it.copy(phase = Phase.IDLE) }
+    }
+
+    /** 清空全部历史记录（元数据 + 缩略图文件） */
+    fun clearHistory() {
+        viewModelScope.launch { historyStore.clearAll() }
+    }
+
+    /** 载入一条历史记录：恢复图片 + LaTeX + 结果，回到结果页（图片文件缺失时仍可看公式与数值） */
+    fun openHistoryEntry(entry: HistoryEntry) {
+        viewModelScope.launch {
+            val bmp = withContext(Dispatchers.IO) {
+                runCatching { BitmapFactory.decodeFile(entry.imagePath) }.getOrNull()
+            }
+            _uiState.update {
+                it.copy(
+                    phase = Phase.RESULT,
+                    imageBitmap = bmp,
+                    latex = entry.latex,
+                    confidence = entry.confidence,
+                    value = entry.value,
+                    valueLatex = entry.valueLatex,
+                    status = entry.status,
+                    message = null,
+                    correcting = false,
+                    snapshot = null,
+                    lastInsertRange = null,
+                )
+            }
+        }
+    }
+
+    /** 识别成功后的首次计算结束（成功或失败）时，把这次拍摄写入历史；修正/切换模式不触发 */
+    private fun maybeRecordHistory() {
+        val bmp = pendingHistoryBitmap ?: return
+        pendingHistoryBitmap = null
+        val s = _uiState.value
+        val latex = s.latex
+        if (latex.isBlank()) return
+        viewModelScope.launch {
+            historyStore.addEntry(bmp, latex, s.confidence, s.value, s.valueLatex, s.status)
+        }
     }
 }

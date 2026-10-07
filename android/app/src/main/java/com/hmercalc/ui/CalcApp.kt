@@ -5,6 +5,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.hmercalc.ui.screens.CaptureScreen
+import com.hmercalc.ui.screens.HistoryScreen
 import com.hmercalc.ui.screens.ResultScreen
 
 // 路由（组长订正 2026-10 新状态机）：
@@ -26,11 +27,19 @@ fun CalcApp(viewModel: CalcViewModel = viewModel()) {
             onReset = viewModel::reset,
         )
 
+        Phase.HISTORY -> HistoryScreen(
+            entries = state.history,
+            onOpen = viewModel::openHistoryEntry,
+            onBack = viewModel::closeHistory,
+            onClear = viewModel::clearHistory,
+        )
+
         else -> CaptureScreen(
             state = state,
             onImageUri = viewModel::onImageUri,
             onRetry = viewModel::retryRecognize,
             onBaseUrlChanged = viewModel::setBaseUrl,
+            onOpenHistory = viewModel::openHistory,
         )
     }
 }

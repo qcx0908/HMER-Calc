@@ -1,5 +1,6 @@
 package com.hmercalc.ui.screens
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.border
 import androidx.compose.foundation.horizontalScroll
@@ -20,6 +21,8 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
 import androidx.compose.material3.Button
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
@@ -117,69 +120,113 @@ private fun ResultContent(
 ) {
     Text("计算结果", style = MaterialTheme.typography.headlineSmall)
 
-    // 原图缩略（供对照判断识别是否正确）
+    // 原图缩略（供对照判断识别是否正确）—— 卡片承载，与背景拉开层次
     state.imageBitmap?.let { bmp ->
-        Image(
-            bitmap = bmp.asImageBitmap(),
-            contentDescription = "原图",
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(110.dp),
-            contentScale = ContentScale.Fit,
-        )
-    }
-
-    Text(
-        "识别公式（置信度 ${String.format(Locale.US, "%.1f%%", state.confidence * 100)}）",
-        style = MaterialTheme.typography.titleMedium,
-    )
-    LatexFormula(state.latex, modifier = Modifier.fillMaxWidth())
-
-    // LaTeX 源码（2026-10 按用户需求新增）：只读展示，与上方渲染公式一一对应，
-    // 供核对识别结果；需要改动时走【需要修正】页的编辑框
-    if (state.latex.isNotBlank()) {
-        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text(
-                "LaTeX 源码",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.outline,
-            )
-            Text(
-                state.latex,
-                style = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace),
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(16.dp),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+        ) {
+            Image(
+                bitmap = bmp.asImageBitmap(),
+                contentDescription = "原图",
                 modifier = Modifier
                     .fillMaxWidth()
-                    .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(8.dp))
+                    .height(120.dp)
                     .padding(8.dp),
+                contentScale = ContentScale.Fit,
             )
+        }
+    }
+
+    // 识别公式卡片：渲染公式 + LaTeX 源码（只读）
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Text(
+                "识别公式（置信度 ${String.format(Locale.US, "%.1f%%", state.confidence * 100)}）",
+                style = MaterialTheme.typography.titleMedium,
+            )
+            LatexFormula(state.latex, modifier = Modifier.fillMaxWidth())
+
+            // LaTeX 源码（2026-10 按用户需求新增）：只读展示，与上方渲染公式一一对应，
+            // 供核对识别结果；需要改动时走【需要修正】页的编辑框
+            if (state.latex.isNotBlank()) {
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text(
+                        "LaTeX 源码",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.outline,
+                    )
+                    Text(
+                        state.latex,
+                        style = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(8.dp))
+                            .padding(8.dp),
+                    )
+                }
+            }
         }
     }
 
     ModeSelector(state.mode, enabled = !state.loading, onModeChanged = onModeChanged)
 
-    Text("数值结果", style = MaterialTheme.typography.titleMedium)
-    if (state.loading) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
+    // 数值结果卡片：浅底 + 铜色大号数值点睛（公式图为黑色，需浅底才可读）
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(20.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            CircularProgressIndicator(modifier = Modifier.width(20.dp).height(20.dp))
-            Text("计算中…")
-        }
-    } else {
-        state.value?.let { v ->
             Text(
-                formatValue(v),
-                style = MaterialTheme.typography.displaySmall,
-                textAlign = TextAlign.Center,
-                modifier = Modifier.fillMaxWidth(),
+                "数值结果",
+                style = MaterialTheme.typography.titleMedium,
+                color = MaterialTheme.colorScheme.outline,
             )
-        }
-        // 精确值（如 π/6）与数值明显不同时才额外渲染，避免与大数字重复
-        state.valueLatex?.let { v ->
-            val plain = state.value?.let { formatValue(it) }
-            if (plain == null || v.trim() != plain) {
-                LatexFormula(v, textSize = 28f, modifier = Modifier.fillMaxWidth())
+            if (state.loading) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    CircularProgressIndicator(modifier = Modifier.width(20.dp).height(20.dp))
+                    Text("计算中…")
+                }
+            } else {
+                state.value?.let { v ->
+                    Text(
+                        formatValue(v),
+                        style = MaterialTheme.typography.displaySmall,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.tertiary,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+                // 精确值（如 π/6）与数值明显不同时才额外渲染，避免与大数字重复
+                state.valueLatex?.let { v ->
+                    val plain = state.value?.let { formatValue(it) }
+                    if (plain == null || v.trim() != plain) {
+                        LatexFormula(v, textSize = 28f, modifier = Modifier.fillMaxWidth())
+                    }
+                }
             }
         }
     }
