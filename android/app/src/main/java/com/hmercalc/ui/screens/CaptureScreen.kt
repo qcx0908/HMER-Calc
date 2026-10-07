@@ -93,10 +93,10 @@ fun CaptureScreen(
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            // 标题（组长订正 2026-10-06）：改全称；字号从 headlineSmall 降到 titleLarge，
-            // 长标题在窄屏（360dp 档）也能单行放下，放不下时正常换行，不会顶出显示区
+            // 标题（组长订正 2026-10-07）：固定两行排版——"HMER-Calc" 一行、"手写公式识别计算系统"
+            // 第二行；统一 titleLarge 字号，两行在 360dp 窄屏均能单行放下、不折行。
             Text(
-                "HMER-Calc 手写公式识别计算系统",
+                "HMER-Calc\n手写公式识别计算系统",
                 style = MaterialTheme.typography.titleLarge,
                 modifier = Modifier.fillMaxWidth(),
             )
@@ -173,15 +173,17 @@ fun CaptureScreen(
                     enabled = !state.loading && urlInput.isNotBlank(),
                 ) { Text("保存地址") }
 
-                // 当前生效地址（保存后才变）+ 模拟器默认说明，均为浅灰小字
+                // 当前生效地址（保存后才变）+ 真机后端地址查询指引，均为浅灰小字
                 Text(
                     "当前生效：${state.baseUrl}",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.outline,
                 )
                 Text(
-                    "模拟器默认 http://10.0.2.2:8000（10.0.2.2 即电脑本机）；" +
-                        "真机改填电脑的局域网 IP，如 http://192.168.43.100:8000",
+                    "真机后端地址查询流程：\n" +
+                        "①电脑cmd命令 ②输 ipconfig ③找「无线局域网适配器」段的 IPv4 地址\n" +
+                        "格式：http://<该IPv4>:8000\n" +
+                        "（10.0.2.2 只在模拟器里使用并表示电脑本机；真机需填电脑在热点里的局域网 IP）",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.outline,
                 )

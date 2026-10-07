@@ -67,6 +67,7 @@
 7. **角度模式三态**：`deg`（角度）/ `rad`（弧度）/ `auto`（默认，三角参数纯数字按角度、含 π 按弧度）。
 8. **C7 修正闭环**：识别后自动先算一次供判定 → 错了进「修正公式」页（实时渲染预览 + 分类符号面板 + LaTeX 编辑框）→ 重算 → 完成/退出修正。
 9. **契约字段 snake_case**，Android 端 `@SerialName` 映射；业务错误返回 HTTP 200 + `status`，只有请求体格式错误才 4xx。
+10. **`value_latex` = 结果的精确值 LaTeX（不是输入回显）**：rad 模式不做角度换算时，`expr` 仍是原始输入式，直接 `sympy.latex` 会把**输入**当结果回显，客户端「数值 + 精确值」两行去重失效、多显示一行。订正（2026-10-06）：先 `simplify`，化简后是纯数值才回显，否则置 `None`（客户端只显示数值）。
 
 ---
 
@@ -203,14 +204,22 @@ adb install -r /e/HMER-Calc/android/app/build/outputs/apk/debug/app-debug.apk
 - **模型首次加载慢**：pix2text 首次 `recognize_formula` 要加载模型（数秒到十几秒），后续变快。App 已提示「首次识别需加载模型，可能较慢」。
 - **低置信度重试**：整页照片且公式占比小会触发裁剪重试，单请求最长约 9s；正常公式图 0.8s。
 - **照片 EXIF**：真机拍照自带 orientation，后端已做 EXIF 归正；不要用会剥离 EXIF 的工具重存测试图。
+- **拍照权限（真机/模拟器点拍照闪退先查这条）**：拍照走系统相机 `ACTION_IMAGE_CAPTURE`（FileProvider 提供输出 URI），相机权限由系统相机 App 持有，**本 App 不要声明 `CAMERA` 权限**——声明了却没做运行时授权时，系统会以 "revoked permission android.permission.CAMERA" 直接拒绝启动相机（SecurityException 闪退）。已订正：移除该权限 + `launchCamera()` 里 catch `SecurityException` 给友好提示。
 
 ---
 
 ## 九、当前状态（截至 2026-10-06）
 
-- **代码已全部提交**，工作树干净：
+- **已提交**（最近 5 条，工作树另有真机健壮性修复未提交，见下）：
   - `e1a07ea` fix: 数字粘连修复 + 低置信度墨迹裁剪重试（模块 1/2 双保险）
   - `443df1b` feat: Android 客户端首次入库 + 本轮 UI 改进
+  - `b1900b0` docs: 新增 hmer.md 项目速览
+  - `e2d6d75` feat: 后端地址改为 App 内可编辑
+  - `1b0678f` feat: 开放后端地址界面编辑 + hmer.md §七同步
+- **未提交**（真机拍照健壮性修复，进行中）：
+  - `AndroidManifest.xml` 移除 `CAMERA` 权限（拍照闪退根因）
+  - `CaptureScreen.kt` `launchCamera()` catch `SecurityException` 给友好提示
+  - `calculation/calculator.py` `value_latex` 改为「结果精确值，非精确置 None」
 - 后端与模拟器当前**均未运行**（上次会话结束后已停）。
 - 待办 / 可继续的方向：
   - 真机验证拍照识别（见 §七；后端地址已在 App 内可编辑，见 §七第 5 步）。
