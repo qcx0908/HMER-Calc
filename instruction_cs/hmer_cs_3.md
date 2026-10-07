@@ -26,7 +26,7 @@
                ✗ 需要修正 --> 修正页（实时渲染预览 + LaTeX 编辑 + 分类符号面板）
                               --> 手动【重新计算】反复调整【C7 闭环】
                               --> 【完成修正】保留改动回结果页 /【退出修正】放弃改动回结果页
-   --> (E1) 可选：保存历史记录
+   --> (E1) 已实现：识别+初算完成后自动保存进「历史记录」（最近 10 次，含图片/LaTeX/结果）
 
 > ① 组长订正 2026-10：C1 现状先用「系统相机 + FileProvider」兜底；CameraX 内嵌取景列入后续。
 >
@@ -183,12 +183,12 @@ interface Calculator {
 
 | 功能 | 预留方式 | 现在是否要做 |
 |---|---|---|
-| E1 历史记录 | `data/` 的 Room（`HistoryEntity`/`HistoryDao`）建表预留 | 建表即可 |
+| E1 历史记录 | 已实现（组长订正 2026-10-07）：`data/` 的 `HistoryStore`（DataStore 存 JSON 元数据 + `filesDir/history/` 存缩略图），最近 10 次，可回载/清空 | 已做 |
 | E2 导出分享 | UI 加按钮；LaTeX 源码已在响应里 | 否 |
 | E3/E8 候选与高亮 | E3 已并入 C7 点选修正；E8 降级为整体置信度拦截（后端已做，见 hmer_cs_1.md） | 否 |
 | E4 框选区域 | 加裁剪交互，上传裁剪后图片 | 否 |
 | E6 模式切换 | 已完成（组长订正 2026-10：升级为 自动/角度/弧度 三态，默认自动） | 已做 |
-| E9 界面优化 | theme / 多语言 / 夜间模式 | 否 |
+| E9 界面优化 | 已做（组长订正 2026-10-07）：高级感配色主题（深邃靛蓝 + 暖铜点缀 + 暖白底，关闭壁纸取色）+ 结果页/首页/历史页卡片化排版 | 已做 |
 | B1 端侧部署 | 补 `LocalRecognizer`/`LocalCalculator` 实现 | 否（余量） |
 | B4 实时流式识别 | 加相机预览 + 连续调 `/recognize` | 否 |
 | B5 端云协同 | 依赖注入处切换 Local/Remote 实现 | 否 |
@@ -207,7 +207,7 @@ interface Calculator {
 | 编辑（C7 所见即所得） | huarangmeng/latex（KMP，含 WYSIWYG 编辑器） |
 | 图像 | CameraX、Photo Picker、Coil |
 | DI | Hilt |
-| 持久化 | Room（E1）+ DataStore（E6 设置/后端地址） |
+| 持久化 | DataStore（E1 历史记录 + E6 设置/后端地址） |
 
 | 组件 | 推荐版本 |
 |---|---|
@@ -249,8 +249,9 @@ HMER-Calc/
     │   ├── CalcApi.kt                   # Retrofit 接口
     │   ├── RemoteRecognizer.kt          # 实现 common.Recognizer
     │   └── RemoteCalculator.kt          # 实现 common.Calculator
-    ├── data/                            # E1/E6 预留
-    │   ├── HistoryEntity.kt / HistoryDao.kt
+    ├── data/                            # E1/E6
+    │   ├── HistoryEntry.kt              # 历史记录一条（@Serializable）
+    │   ├── HistoryStore.kt              # 历史持久化（DataStore JSON + filesDir 缩略图）
     │   └── SettingsStore.kt             # 后端地址、deg/rad 设置
     └── ui/
         ├── MainActivity.kt
@@ -258,7 +259,8 @@ HMER-Calc/
         ├── CalcViewModel.kt             # UiState 状态机
         ├── screens/
         │   ├── CaptureScreen.kt
-        │   └── ResultScreen.kt
+        │   ├── ResultScreen.kt
+        │   └── HistoryScreen.kt         # 历史记录列表页（组长订正 2026-10-07 新增）
         └── theme/
 ```
 
