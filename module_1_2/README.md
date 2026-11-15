@@ -186,27 +186,31 @@ curl -X POST http://127.0.0.1:8000/recognize -H "Content-Type: application/json"
 它 monkeypatch 掉识别器使其抛 `RuntimeError`，断言接口仍返回 200 + ERROR。
 这直接对应 `ALL.md` §六 红牌项 2/3（"遇非法输入返回 500 崩溃即退回"）。
 
-**低置信度门槛（`MIN_ACCEPTABLE_SCORE = 0.95`，2026-10-06 按需求方确认实现）**：
-当所有候选方向的**最高分 < 0.95** 时，接口**不返回识别结果**，改为
-`HTTP 200` + `status="ERROR"` + `latex=""`，`message` 提示"请确认图片方向是否正确、或框选单个公式后重试"。
-模型原始输出仍保留在内部 `returned_latex` 与响应头 `X-Recognition-Meta` 中供排查。
+**置信度分档（`MIN_ACCEPTABLE_SCORE = 0.95`、`LOW_CONFIDENCE_SCORE = 0.55`；2026-10-08 按需求方要求由单档门槛改来）**：
 
-实测依据（22 个样本人工标注比对，见 §5）：**正确样本 score 0.9568~1.0；错误样本 0.8977~0.9445**；
-另有一张方向选错的样本 0.8914 —— 即"最高分 < 0.95"在本样本集内**全部是错的结果**。
+| 最高分 | 行为 |
+|---|---|
+| `≥ 0.95` | 正常返回 `SUCCESS`，`message=None` |
+| `0.55 ~ 0.95` | **仍返回最高分结果**（`status="SUCCESS"`），`message` 提示"识别置信度偏低，结果仅供参考，请人工核对"；`meta.reason=low_confidence` |
+| `< 0.55` | 降级为 `ERROR`，`latex=""`，`message` 提示重拍/确认方向（过低基本是噪声，返回反而误导） |
+
+低置信度分支模型原始输出仍保留在内部 `returned_latex` 与响应头 `X-Recognition-Meta` 中供排查。
+
+实测依据（人工标注样本）：**正确样本 score 0.9568~1.0；错误样本 0.8977~0.9445**——两组重叠，
+所以 `confidence` 只能做**提示**，不能做正确性判据；`0.55` 留有安全余量（纯噪声候选实测多在 0.86 以下）。
 
 真实 HTTP 验证（同一进程内两次请求）：
 
 ```
 POST /recognize (photo_picture3.png, 0.9969) → 200 {"latex":"\\cos\\frac{\\pi} {2}+1",...,"status":"SUCCESS"}
-POST /recognize (picture1.jpg,     0.9348) → 200 {"latex":"","confidence":0.9348,...,"status":"ERROR",
-                                               "message":"识别置信度偏低（0.9348 < 0.95），结果可能不可靠：..."}
+POST /recognize (低置信样本,         0.9348) → 200 {"latex":"<最高分候选>","confidence":0.9348,...,"status":"SUCCESS",
+                                               "message":"识别置信度偏低（0.9348 < 0.95），结果仅供参考，请人工核对；..."}
                                                X-Recognition-Meta: reason="low_confidence", angle=90
 ```
 
-⚠️ 这是**经验阈值**，不是理论边界：正确样本下沿（0.9568）与错误样本上沿（0.9445）仅差 0.012，
-样本量 19。因此它**只用于"宁可让用户确认，也不返回错误结果"**，不能替代题目 C7 的手动修正闭环。
+⚠️ 分档不等于"0.95 以下可以放心用"：正确与错误样本的分数区间重叠，因此**必须保留题目 C7 的手动修正闭环**。
 
-对应回归测试 `test_low_confidence_is_downgraded_to_error`。
+对应回归测试 `test_low_confidence_returns_best_guess_with_warning`、`test_low_confidence_returns_best_guess_with_warning_via_stub`。
 
 ---
 
@@ -310,6 +314,10 @@ POST /recognize (picture1.jpg,     0.9348) → 200 {"latex":"","confidence":0.93
 
 **对 E8「低置信度高亮」的建议**：可以用 `score < 0.95` 作为**初步提示**（本实验中有效），
 但必须同时提供**人工修正闭环**（题目 C7），不能把 confidence 当作自动放行的依据。
+
+> 📌 **2026-10-08 行为更新**：上面的 0.95 检验是**当年选阈值时的实验依据**。当前实现已改为分档——
+> `≥0.95` 正常返回；`0.55~0.95` **返回结果并提示人工核对**（不再拒收）；`<0.55` 才判 ERROR。
+> 因此 0.95 现在是"正常 / 提示"的分界，不再是"返回 / 拒收"的分界。
 
 各候选方向得分 / 耗时明细：
 
@@ -448,7 +456,7 @@ pytest tests/test_recognition.py -v  # 完整测试
 | 步骤 | 期望输出 | 退出码 |
 |---|---|---|
 | `python selfcheck.py` | 逐项 `[PASS]`，结尾 `自检结果：22/22 项通过` | `0` |
-| `pytest tests/test_recognition.py -v` | **36 passed**（约 2 分钟） | `0` |
+| `pytest tests/test_recognition.py -v` | **83 passed**（约 2 分钟） | `0` |
 
 **`selfcheck.py` 退出码语义**：`0` = 全通过；`1` = 有检查项失败（**可能是真问题**）；
 `2` = **缺前置依赖**（环境问题，不是代码问题）。
@@ -474,10 +482,10 @@ cd <交付文件夹>
 pytest tests/test_recognition.py -v
 ```
 
-**实测结果：36 passed**（约 2 分钟，含模型加载与多次推理）。
+**实测结果：83 passed**（约 2 分钟，含模型加载与多次推理）。
 
 其中针对真实照片的回归测试，素材**已随包携带**，因此验收方离线也能跑出完整覆盖（0 skipped）：
-- `picture1.jpg`（EXIF=0）→ 验证「EXIF=0 不等于方向可信」与「低置信度降级为 ERROR」
+- `picture1.jpg`（EXIF=0）→ 验证「EXIF=0 不等于方向可信」与「低置信度分档」（score 0.9348 落在 0.55~0.95，返回结果 + 提示人工核对）
 - `picture2.jpg`（整页多公式）→ 验证多公式走 ERROR 通道
 - `photo_picture3.png`（EXIF=8）→ 验证 EXIF 归正链路
 
@@ -491,7 +499,7 @@ pytest tests/test_recognition.py -v
 | M1-2 | `/recognize` 返回合法 JSON | `selfcheck.py` 第三节 | ✅ |
 | M1-3 | `latex` 非空字符串 | `selfcheck.py` 第三节 | ✅ `\frac{\pi} {2}` |
 | M1-4 | `confidence ∈ [0,1]` | `selfcheck.py` 第三节 | ✅ 0.9997 |
-| M1-5 | 独立测试通过 | `pytest tests/test_recognition.py` | ✅ 36 passed |
+| M1-5 | 独立测试通过 | `pytest tests/test_recognition.py` | ✅ 83 passed（全后端 110） |
 | M1-6 | 不依赖模块 2 | `selfcheck.py` 第五节（新进程验证） | ✅ 未加载 `app.calculation` / `app.main` |
 | M1-7 | 预留字段未删 | `selfcheck.py` 第三节 | ✅ `tokens: []` |
 
@@ -506,7 +514,7 @@ pytest tests/test_recognition.py -v
 | `SUCCESS` | 拿到 LaTeX。**但仍需肉眼核对**：实测 19 个标注样本准确率 **15/19 ≈ 78.9%**，典型错误是字符级误读（上标 `n`→`3 3`、数字 `0`→字母 `o`） |
 | `ERROR` + `reason=empty` | 模型没读出任何公式（图里可能没公式，或公式过小） |
 | `ERROR` + `reason=multiline` | 读出的是**多行/多公式结构** → 当前只支持单一公式（C3；E7 未实现）。需框选单个公式 |
-| `ERROR` + `reason=low_confidence` | **置信度低于门槛 0.95，被主动拒绝**（设计行为，不是崩溃），详见 §5 与 §6.6 |
+| `ERROR` + `reason=low_confidence` | **置信度低于 0.55，被主动拒绝**（设计行为，不是崩溃）；0.55~0.95 会返回结果并带提示，详见 §5 与 §6.6 |
 | `ERROR` + `reason=unexpected_error` | 任何未预期异常都被兜底成 200 + ERROR，**绝不返回 5xx**（红牌项 2/3） |
 
 **`confidence` 的正确用法**（实测 22 样本：正确 15 个 score 0.9568~1.0；错误 4 个 0.8977~0.9445）：
@@ -591,7 +599,7 @@ app/                     后端代码（recognition/ 为模块一实现）
   main.py                组长锁定入口
   calculation/           模块二占位（只有 __init__.py，待成员 2 交付）
   recognition/           模块一实现：router.py / recognizer.py / preprocess.py
-tests/test_recognition.py   模块一独立测试（36 passed）
+tests/test_recognition.py   模块一独立测试（83 passed）
 tests/fixtures/           测试素材 7 张：
     formula_1/2/3.png     印刷体公式渲染图（matplotlib 渲染，结论确定）
     photo_picture3.png    真实手写照片，保留 EXIF 方向=8（验证 EXIF 归正链路）
@@ -742,7 +750,7 @@ python selfcheck.py      # 期望：自检结果：22/22 项通过（退出码 0
 | 项 | 期望 |
 |---|---|
 | `python selfcheck.py` | `22/22 项通过`，退出码 `0` |
-| `pytest tests/test_recognition.py` | `36 passed`（约 2 分钟） |
+| `pytest tests/test_recognition.py` | `83 passed`（约 2 分钟） |
 | `GET /health` | `{"status":"ok"}` |
 | `POST /recognize`（`tests/fixtures/formula_2.png`） | `{"latex":"\\frac{\\pi} {2}","confidence":0.99975,...,"status":"SUCCESS"}` |
 
@@ -773,7 +781,7 @@ python selfcheck.py      # 期望：自检结果：22/22 项通过（退出码 0
 ### 坑 5：把 `confidence` 当成"识别正确"的判据
 
 实测 22 个标注样本：正确样本 score 0.9568~1.0，错误样本 0.8977~0.9445，**两组间距只有 0.012**。
-模块一已实现 **`MIN_ACCEPTABLE_SCORE = 0.95`** 门槛：所有候选方向最高分 < 0.95 时**不返回结果**，
+模块一已实现**置信度分档**：`≥0.95` 正常返回；`0.55~0.95` 返回最高分结果并提示人工核对；`<0.55` 才**不返回结果**，
 改为 `status="ERROR"` + `message` 提示用户确认方向。**模块二/模块三不要依赖 confidence 做自动放行**，
 必须保留题目 C7 的手动修正闭环。
 
@@ -807,10 +815,10 @@ python selfcheck.py      # 期望：自检结果：22/22 项通过（退出码 0
 ## 9.8 我这边已完成 / 未完成的边界（交接声明）
 
 **已完成**：
-- `app/recognition/` 三个实现文件 + `tests/test_recognition.py`（36 passed）
+- `app/recognition/` 三个实现文件 + `tests/test_recognition.py`（83 passed）
 - `selfcheck.py` 一键自检 22 项（含契约 SHA256 校验）
 - `/health`、`/recognize` 真实 uvicorn + curl 验证；手机热点联调已跑通
-- `pytest` 36 passed / 0 skipped（素材随包携带，离线可跑）
+- `pytest` 83 passed / 0 skipped（素材随包携带，离线可跑）
 
 **未完成 / 需你接手**：
 - **模块二 `app/calculation/` 本身**（你的部分）

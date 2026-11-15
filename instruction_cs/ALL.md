@@ -88,10 +88,12 @@ class CalculateResponse(BaseModel):
 | M1-2 | `/recognize` 返回合法 JSON | `curl` 传 Base64 图，返回 `latex`+`confidence` | ☐ |
 | M1-3 | `latex` 合法 | 非空字符串即可（pix2text 原始输出，含 `\left` 等变体也接受） | ☐ |
 | M1-4 | `confidence` ∈ [0,1] | 抽查若干样本 | ☐ |
-| M1-5 | 独立测试通过 | `pytest tests/test_recognition.py` 全绿 | ☐ |
+| M1-5 | 独立测试通过 | `pytest tests/test_recognition.py` 全绿（当前 **83 项**；全后端 110 项） | ☐ |
 | M1-6 | 不依赖模块 2 | 只挂 recognition router 也能启动并测通 | ☐ |
-| M1-7 | 预留字段未删 | `tokens`/`alternatives`/`range_*` 保留；Pix2Text 无 token 级输出，`tokens` 恒为空 `[]`（E3 放弃、E8 降级为整体置信度拦截） | ☐ |
+| M1-7 | 预留字段未删 | `tokens`/`alternatives`/`range_*` 保留；Pix2Text 无 token 级输出，`tokens` 恒为空 `[]`（E3 放弃、E8 降级为整体置信度分档） | ☐ |
 | M1-8 | 多位数不被拆散（组长订正 2026-10 新增） | `pytest tests/test_recognition.py -k two_digit` 全绿；回归素材 `photo_12/25/48.jpg` 期望输出 `12-7` / `25+3 \times4` / `48 \div6`（12.jpg 另验证裁剪重试：全图 0.7831 → 裁剪 0.9960） | ☐ |
+| M1-9 | 置信度分档（组长订正 2026-10-08 新增） | `pytest tests/test_recognition.py -k low_confidence` 全绿；0.55~0.95 返回结果并带 `message` 提示人工核对，<0.55 才 `status="ERROR"` | ☐ |
+| M1-10 | 数字/字母混淆纠正（成员 1，2026-10-08） | `pytest tests/test_recognition.py -k normalize_digit_confusions` 全绿；39 张人工标注样本准确率 ≥87%（校正后约 89.7%），边界见 `分发/HMER-Calc-TestKit/RECOGNITION-CAPABILITY.md` | ☐ |
 
 ---
 

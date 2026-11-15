@@ -1,9 +1,0 @@
-pix2text
-latex2sympy2
-sympy
-fastapi
-uvicorn
-pydantic
-pillow
-pytest
-httpx

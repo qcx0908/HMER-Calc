@@ -13,3 +13,6 @@
 
 # 组长临时测试图片（已复制进 module_1_2/tests/fixtures/ 作为回归素材）
 error/
+
+# 课程设计报告/PPT/幻灯片（本地保留，不进仓库）
+files/

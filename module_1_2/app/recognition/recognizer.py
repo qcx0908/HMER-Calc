@@ -16,6 +16,7 @@
 """
 from __future__ import annotations
 
+import re
 import threading
 import time
 from dataclasses import dataclass, field
@@ -35,6 +36,7 @@ __all__ = [
     "DEFAULT_ANGLES",
     "EARLY_EXIT_SCORE",
     "MIN_ACCEPTABLE_SCORE",
+    "LOW_CONFIDENCE_SCORE",
 ]
 
 #: 识别失败（模型没给出内容）
@@ -80,6 +82,83 @@ EARLY_EXIT_SCORE = 0.95
 #: ⚠️ 这是**经验阈值**（正确下沿 0.9568 与错误上沿 0.9445 仅差 0.012，样本量 19），
 #: 不能替代 C7 手动修正闭环，只用于"宁可让用户确认，也不返回错误结果"。
 MIN_ACCEPTABLE_SCORE = 0.95
+
+#: 低置信度下界（成员 1 于 2026-10-08 按需求方要求新增）：
+#: 需求原文「无结果的图像给出置信度最高的选择，并且告知用户识别置信度低」。
+#: 因此把原来「< 0.95 一律拒收」改为三档：
+#:   >= 0.95          → 正常返回 SUCCESS
+#:   0.55 ~ 0.95      → **仍返回最高分候选**，message 提示低置信、请人工核对
+#:   <  0.55          → 仍拒收为 ERROR（过低的分基本是噪声，返回反而误导）
+#: 取值依据：实测 7 张"无结果"样本中，有实际内容的最高分为 0.9445、
+#: 方向选错时为 0.8977~0.9133；而真正是噪声的候选（如 270° 的
+#: `\underbrace{\overbrace{\varsigma}}`）在 0.86 以下。0.55 留有安全余量。
+LOW_CONFIDENCE_SCORE = 0.55
+
+#: 裁剪轮替换首轮结果所需的**最小分数优势**（成员 1 于 2026-10-08 新增）。
+#: 原实现「裁剪轮 rank 更高就替换」会把首轮正确结果换掉（P8.jpg / P10.jpg 实测）。
+#: 真实需要裁剪的案例提升幅度很大（12.jpg：0.7831 → 0.9940，+0.21），
+#: 因此 0.03 足以放过真实改善、挡住 0.0006 级别的噪声替换。
+CROP_REPLACE_MARGIN = 0.03
+
+#: 「字母紧邻乘除号」= 错误翻转产生的伪形态。
+#: 需求方判据（2026-10-08）：「带符号的乘法一般不存在未知数，除法也是常数优先」——
+#: 出现 `\times` / `\div` 时两侧几乎一定是常数，若某侧是字母，说明该候选来自错误翻转。
+#: 实测 3.jpg：真值 `6×7`，错误翻转的 270° 输出 `L \times9` 反而拿到 0.9983。
+#: ⚠️ 只惩罚**归一化救不回来**的翻转形态：`z \div2` 虽然也含字母，但 `normalize_digit_confusions`
+#:    会把 `z` 还原为 8、得到正确结果，因此**不能**在这里降级（实测那样会让 4.jpg / 6.jpg 反而选错）。
+#:    真正要压的是 `L \times9`（`L` 是数字 7 被翻转的产物）这类字母**不是**已知可还原形态的情形。
+_BAD_OPERAND = re.compile(
+    r"(?<![A-Za-z])(?:[L](?=\s*(?:\\times|\\div)))"           # `L \times9`：7 翻转成 L
+    r"|(?:(?:\\times|\\div)\s*[Ll](?![a-zA-Z]))"
+    r"|(?:[\d}\s]\s*[+\-=]\s*[ilI]\b(?![a-zA-Z]))"            # `1-i=8`：1 翻转成 i
+)
+
+#: 「结构命令堆砌」= 模型读不出内容时的典型输出形态（输出可信度低）。
+#: 实测：6.jpg 的 0° 输出 `\underbrace{\alpha}_{\Downarrow}`（0.891）、
+#:       p1.jpg 的 270° 输出 `\underbrace{\overbrace{\varsigma}}...`（0.9119）、
+#:       P10.jpg 的 90° 输出 `\underbrace{\omicron}...`（0.9475）——
+#:       它们在纯 score 排序下会压过真正可读的候选，必须显式降级。
+#: 判据用「堆砌结构命令 **且** 一个数字都没有」：`\frac{1} {2}` 这类正常结构含数字，不会误伤。
+_STRUCT_NOISE = re.compile(
+    r"\\(?:underbrace|overbrace|stackrel|wp|varsigma|zeta|omicron|Im|neq|sharp|"
+    r"bullet|diamond|protect|relax|textcircled)"
+)
+
+#: 与 `_STRUCT_NOISE` 同类的**符号名**（本身不是算式内容的装饰符号）
+_SYMBOL_NAMES = re.compile(
+    r"\\(?:bullet|diamond|varsigma|zeta|wp|omicron|Im|ast|star|circ|sim|S|P|lambda|"
+    r"leftarrow|longrightarrow|Leftrightarrow|breve|varpi|vartheta|alpha|beta)"
+)
+
+
+def _looks_unreliable(latex: str) -> bool:
+    r"""输出可信度粗判 → 判为不可信的条件（满足任一）：
+
+    1. **结构命令堆砌 + 数字密度极低**；
+    2. **完全没有数字**。
+
+    判据 2 的依据（成员 1，2026-10-08，需求方确认）：
+    本模块的需求范围是「四则 / 分数 / 幂 / 根号 / 基础三角函数」——
+    **任何合法结果必然至少含一个数字**。实测所有正确输出均含数字：
+
+    | 含数字 ✅ | 完全无数字 ❌（实测垃圾） |
+    |---|---|
+    | `6 \\times7` / `8 \\div2-1` / `\\frac{1} {2}` | `\\log \\pi^{\\rho\\sigma}`（P8.jpg 180°） |
+    | `\\sin60^{\\circ}` / `\\tan540^{\\circ}` / `2^{10}` | `\\underbrace{\\overbrace{\\varsigma}}_{\\wp}` |
+    | `\\cos 9 ^{\\circ}` | `\\stackrel{\\longleftarrow} {a}` |
+
+    这条判据直接解决了 P8.jpg 的失败：180° 的 `\\log \\pi^{\\rho\\sigma}`（0.8977）
+    曾压过 0° 的正确结果 `\\cot60^{\\circ}`（0.8319），而它**一个数字都没有**。
+    """
+    if not latex:
+        return False
+    if not re.search(r"\d", latex):
+        return True  # 判据 2：合法结果必含数字
+    if not _STRUCT_NOISE.search(latex):
+        return False
+    digits = len(re.findall(r"\d", latex))
+    structures = len(_STRUCT_NOISE.findall(latex)) + len(_SYMBOL_NAMES.findall(latex))
+    return digits <= 1 or structures >= 3
 
 
 @dataclass
@@ -236,22 +315,43 @@ class Recognizer:
         return "", 0.0
 
     @staticmethod
-    def _rank(outcome: RecognitionOutcome) -> Tuple[int, int, float]:
-        """竞优关键字：先看是否识别出内容，再比 score，最后比长度（score 相同时长的更可信）。
+    def _rank(outcome: RecognitionOutcome) -> Tuple[int, int, int, int, int, float]:
+        """竞优关键字（按优先级从高到低）：
 
-        纯 score 排序在实测中会选错：`picture1` 的 0° 输出垃圾
-        `\\begin{matrix} \\hline{} \\\\ \\end{matrix}` 却有 score 0.9040，
-        而正确方向 90°（`\\frac{1}{1-x}=\\sum...`）是 0.9348 —— 差距只有 0.03。
-        因此这里给「两字符以下的退化输出」降一级，避免它压过正确结果。
+        1. `有内容`            —— 空结果最低；
+        2. `非多行结构`        —— 多行本来就会被拒收，不该压过可用候选
+                                  （实测 19.jpg：180° 的 6 行矩阵拿下 0.9133，压过了单行结果）；
+        3. `形态可信`          —— **数字×数字 优先于 字母×数字**。
+                                  实测 3.jpg：真值 `6×7`，但错误翻转（270°）产生的 `L \\times9`
+                                  拿到 0.9983、反超正确的 90°（`6 \\times7`，0.9487）。
+                                  据需求方判据「带符号的乘法一般不存在未知数」，
+                                  字母参与乘除时判为翻转伪形态，降级；
+        4. `非退化`（长度 > 2）；
+        5. `score`             —— 最后才比模型置信度。
+
+        注：**不**把「输出可信度」做成细粒度打分参与排序 —— 实测那样会让
+        `\\frac{1} {2 6}`（3.jpg 180°）压过正确结果。可信度只做**粗粒度垃圾判定**（第 3 步的形态检查）。
         """
         content = (outcome.latex or "").strip()
         if not content:
-            return (0, 0.0, 0)
+            return (0, 0, 0, 0, 0.0)
+        # 形态/可信度用**原始形态**判断：归一化后的文本会掩盖「翻转」证据
+        raw = str(outcome.meta.get("raw_latex") or content)
+        multiline = 0 if outcome.meta.get("reason") == "multiline" else 1
+        shape = 0 if _BAD_OPERAND.search(raw) else 1
+        credible = 0 if _looks_unreliable(raw) else 1
         degenerate = 0 if len(content) <= 2 else 1
-        return (1, degenerate, outcome.confidence)
+        return (1, multiline, shape, credible, degenerate, outcome.confidence)
 
     def _evaluate(self, image: Image.Image, angle: int) -> RecognitionOutcome:
-        """识别单个候选方向，并做「空结果 / 多行结构」判定。"""
+        """识别单个候选方向，做「空结果 / 多行结构」判定，并**先归一化再竞优**。
+
+        为什么归一化要放在竞优**之前**（需求方 2026-10-08 明确）：
+        有些候选**原始形态**是垃圾、但归一化后就是正确答案，例如 P10.jpg 的 0°
+        `\\operatorname{s i n} \\ 6 o^{\\circ}` → `\\sin \\ 60^{\\circ}`（正确）。
+        若先按原始形态竞优，它会被 90° 的垃圾（0.9475）压掉、**根本没机会参赛**。
+        所以每个候选都先过 `normalize_digit_confusions`，用**修复后的形态**参与排序。
+        """
         started = time.time()
         latex, score = self._recognize_once(image)
         elapsed = round(time.time() - started, 2)
@@ -266,6 +366,24 @@ class Recognizer:
                 meta={"angle": angle, "score": score, "reason": "empty", "seconds": elapsed},
             )
 
+        normalized = postprocess.normalize_digit_confusions(latex)
+        # 保留原始形态：**排序要用原始形态判断翻转伪形态**（见 _rank 的 shape 维度）。
+        # 否则归一化会把 `L \times9` 修成 `6 \times9`，把「错误翻转」的证据自己抹掉，
+        # 结果它反而以 0.9983 压过正确的 90°（实测 3.jpg 回归）。
+        raw_latex = latex
+        if normalized != latex:
+            latex = normalized
+
+        # 兼容旧标记：`digit_merge` 表示做过拆散数字合并，`confusion_fix` 表示做过混淆还原。
+        # 注意：归一化已提前到 _evaluate（为了让修复后的形态能参与竞优），
+        # 所以这两个标记也必须在**这里**设置；放在 recognize() 末尾的话永远不会触发。
+        merged_only = postprocess.merge_split_digits(raw_latex)
+        meta_extra: Dict[str, Any] = {"raw_latex": raw_latex}
+        if merged_only != raw_latex:
+            meta_extra["digit_merge"] = True
+        if latex != merged_only:
+            meta_extra["confusion_fix"] = True
+
         if is_multiline_structure(latex):
             return RecognitionOutcome(
                 latex=latex,
@@ -275,7 +393,8 @@ class Recognizer:
                     "识别到多行/多公式结构，当前版本仅支持单一公式（对应功能项 C3；"
                     "多公式 E7 未实现）。请框选单个公式后重试。"
                 ),
-                meta={"angle": angle, "score": score, "reason": "multiline", "seconds": elapsed},
+                meta={"angle": angle, "score": score, "reason": "multiline",
+                      "seconds": elapsed, **meta_extra},
             )
 
         return RecognitionOutcome(
@@ -283,7 +402,8 @@ class Recognizer:
             confidence=score,
             status=STATUS_SUCCESS,
             message=None,
-            meta={"angle": angle, "score": score, "reason": "ok", "seconds": elapsed},
+            meta={"angle": angle, "score": score, "reason": "ok", "seconds": elapsed,
+                  **meta_extra},
         )
 
     # -- 对外入口 ------------------------------------------------------------------
@@ -380,26 +500,56 @@ class Recognizer:
         # ---- 低置信度回退：墨迹裁剪重试（组长订正 2026-10）----
         # 只在首轮低于门槛时触发；裁剪无变化的候选被跳过，所以纯背景 / 已裁紧的图
         # 不会额外花推理。裁剪轮达到 EARLY_EXIT_SCORE 会在轮内提前结束。
+        #
+        # ⚠️ 替换门槛（成员 1 于 2026-10-08 加，需求方确认）：
+        # 原实现是「裁剪轮只要 `_rank` 更高就替换」，实测**会把首轮的正确结果换掉**：
+        #   · P8.jpg  首轮 0° = `\cot60^{\circ}`（0.8319，**正确**）
+        #             → 裁剪轮 180° 的 `log \pi^{\rho\sigma}` 0.8977 把它顶掉
+        #   · P10.jpg 首轮 0° = `\sin 60^{\circ}`（0.9445，**正确**）
+        #             → 裁剪轮 0° 变异成 `\sin \not< o \nu`，score 0.9451 只高 0.0006 就顶掉
+        # 而真正需要裁剪的案例（12.jpg：0.7831 → 0.9940）提升幅度是 0.21，远超噪声。
+        # 因此要求裁剪轮**显著更优**才允许替换（同时不允许形态/可信度变差）。
+        # `CROP_REPLACE_MARGIN` 取 0.03：能放过 12.jpg 那类真实改善，挡住 0.0006 级别的噪声。
         score_before_crop = best.confidence
         crop_info: Dict[str, Any] = {"crop_retry_used": False}
         if best.confidence < MIN_ACCEPTABLE_SCORE:
             crop_best, crop_attempted = self._run_pass(candidates, stage="crop", use_crop=True)
             attempted.extend(crop_attempted)
-            improved = crop_best is not None and self._rank(crop_best) > self._rank(best)
+            improved = False
+            if crop_best is not None:
+                rank_ok = self._rank(crop_best) > self._rank(best)
+                score_margin_ok = crop_best.confidence >= best.confidence + CROP_REPLACE_MARGIN
+                # 裁剪结果不允许形态/可信度比首轮差（防止用垃圾换掉可读结果）
+                form_ok = (
+                    (0 if _BAD_OPERAND.search(str(crop_best.meta.get("raw_latex") or "")) else 1,
+                     0 if _looks_unreliable(str(crop_best.meta.get("raw_latex") or "")) else 1)
+                    >= (0 if _BAD_OPERAND.search(str(best.meta.get("raw_latex") or "")) else 1,
+                        0 if _looks_unreliable(str(best.meta.get("raw_latex") or "")) else 1)
+                )
+                improved = rank_ok and score_margin_ok and form_ok
             crop_info = {
                 "crop_retry_used": True,
                 "crop_retry_improved": improved,
+                "crop_score": None if crop_best is None else round(float(crop_best.confidence), 4),
+                "crop_required_margin": CROP_REPLACE_MARGIN,
                 "score_before_crop": score_before_crop,
             }
             if improved:
                 best = crop_best
 
-        # ---- 数字粘连修复（组长订正 2026-10）----
-        # 放在选优之后：不影响竞优/降级判定所依赖的原始形态（长度、score）。
-        merged = postprocess.merge_split_digits(best.latex or "")
-        if merged != (best.latex or ""):
-            best.meta["digit_merge"] = True
-        best.latex = merged
+        # ---- 数字粘连修复 + 数字/字母混淆修复（组长订正 2026-10；成员 1 扩充 2026-10-08）----
+        # 放在选优之后（兜底）：_evaluate 已做过一轮归一化，这里是**幂等的二次保险**，
+        # 并保证 `best.latex` 一定是归一化后的形态。
+        # 注意标记要在 _evaluate 里设（那里比较的是**原始形态**）；这里只补漏。
+        raw_of_best = str(best.meta.get("raw_latex") or "")
+        if raw_of_best:
+            if postprocess.merge_split_digits(raw_of_best) != raw_of_best:
+                best.meta["digit_merge"] = True
+        normalized = postprocess.normalize_digit_confusions(best.latex or "")
+        if normalized != (best.latex or ""):
+            best.meta["confusion_fix"] = True
+            best.meta.setdefault("before_confusion_fix", best.latex)
+        best.latex = normalized
 
         best.meta["attempted"] = attempted
         best.meta["candidates"] = len(candidates)
@@ -407,22 +557,31 @@ class Recognizer:
         best.meta.update(crop_info)
         best.confidence = min(1.0, max(0.0, float(best.confidence)))
 
-        # ---- 最低置信度门槛（用户 2026-10-06 确认采用 score ≥ 0.95）----
-        # 实测依据（22 个样本，人工标注比对）：
-        #   正确样本 score 区间 0.9568 ~ 1.0；错误样本 0.8977 ~ 0.9445；
-        #   另有一张方向选错的样本 0.8914。
-        # 即「最高分候选 < 0.95」时，输出**很可能是错的**（本样本集内 100% 是错的），
-        # 此时不应冒充成功，而应把决定权交回用户（题目 C7 的手动修正闭环）。
+        # ---- 置信度分档（成员 1 于 2026-10-08 按需求方要求调整）----
+        # 需求：「无结果的图像给出置信度最高的选择，并且告知用户识别置信度低」
+        # 因此不再一律拒收：
+        #   score >= MIN_ACCEPTABLE_SCORE(0.95)      → 正常 SUCCESS
+        #   LOW_CONFIDENCE_SCORE <= score < 0.95     → **仍返回结果**，但 message 提示低置信
+        #   score <  LOW_CONFIDENCE_SCORE(0.55)      → 太低，仍降级为 ERROR（避免返回纯噪声）
         best.meta["min_acceptable_score"] = MIN_ACCEPTABLE_SCORE
+        best.meta["low_confidence_score"] = LOW_CONFIDENCE_SCORE
         if best.status == STATUS_SUCCESS and best.confidence < MIN_ACCEPTABLE_SCORE:
-            best.meta["reason"] = "low_confidence"
-            best.returned_latex = best.latex  # 保留原文供诊断，但不作为结果返回
-            best.latex = ""
-            best.status = STATUS_ERROR
-            best.message = (
-                f"识别置信度偏低（{best.confidence:.4f} < {MIN_ACCEPTABLE_SCORE}），"
-                "结果可能不可靠：请确认图片方向是否正确、或框选单个公式后重试。"
-            )
+            if best.confidence >= LOW_CONFIDENCE_SCORE:
+                best.meta["reason"] = "low_confidence"
+                best.message = (
+                    f"识别置信度偏低（{best.confidence:.4f} < {MIN_ACCEPTABLE_SCORE}），"
+                    "结果仅供参考，请人工核对；如不对请确认图片方向或框选单个公式后重试。"
+                )
+            else:
+                # 置信度过低：保留最高分候选原文供诊断，但不作为结果返回
+                best.meta["reason"] = "low_confidence"
+                best.returned_latex = best.latex
+                best.latex = ""
+                best.status = STATUS_ERROR
+                best.message = (
+                    f"识别置信度过低（{best.confidence:.4f} < {LOW_CONFIDENCE_SCORE}），"
+                    "无法给出可靠结果：请确认图片方向是否正确、或框选单个公式后重试。"
+                )
         return best
 
     def recognize_base64(self, image_base64: str) -> RecognitionOutcome:

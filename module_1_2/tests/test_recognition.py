@@ -33,9 +33,11 @@ from PIL import Image
 from app.recognition import postprocess, preprocess, router as router_module
 from app.recognition.recognizer import (
     EARLY_EXIT_SCORE,
+    LOW_CONFIDENCE_SCORE,
     MIN_ACCEPTABLE_SCORE,
     STATUS_ERROR,
     STATUS_SUCCESS,
+    RecognitionOutcome,
     Recognizer,
     is_multiline_structure,
 )
@@ -290,8 +292,8 @@ def test_low_confidence_success_does_not_stop_the_search():
     注意：模型本身会把上标 `n` 误读为 `3 3`（score 仍 0.9348），
     所以本测试**只断言方向选择正确**，不断言识别完全正确。
 
-    另注：该 0.9348 也低于 `MIN_ACCEPTABLE_SCORE`(0.95)，
-    因此最终会被降级为 `status="ERROR"`（见下一个测试）——这正是预期行为。
+    另注：该 0.9348 也低于 `MIN_ACCEPTABLE_SCORE`(0.95)，但高于 `LOW_CONFIDENCE_SCORE`(0.55)，
+    因此按 2026-10-08 的分档规则：**仍返回该结果**并附「置信度偏低」提示（见下一个测试）。
     """
     picture1 = find_photo("picture1.jpg")
     if picture1 is None:
@@ -305,19 +307,20 @@ def test_low_confidence_success_does_not_stop_the_search():
 
     # 方向必须选对（这是本测试的核心：0° 的垃圾结果不能终止搜索）
     assert outcome.meta["angle"] == 90, f"应选中 90°，实际 {outcome.meta['angle']}°"
-    assert "\\hline" not in outcome.returned_latex, "不能采用 0° 的垃圾结果"
-    assert "\\frac" in outcome.returned_latex and "\\sum" in outcome.returned_latex
+    # 结果可能是 latex（低置信度仍返回）或 returned_latex（被拒收时保留原文）
+    content = outcome.latex or outcome.returned_latex
+    assert "\\hline" not in content, "不能采用 0° 的垃圾结果"
+    assert "\\frac" in content and "\\sum" in content
     assert outcome.confidence == max(item["score"] for item in attempted)
 
 
-def test_low_confidence_is_downgraded_to_error():
-    """`score < MIN_ACCEPTABLE_SCORE`(0.95) 时必须降级为 ERROR，不冒充成功。
+def test_low_confidence_returns_best_guess_with_warning():
+    """`LOW_CONFIDENCE_SCORE <= score < MIN_ACCEPTABLE_SCORE` 时应**返回最高分候选** + 低置信提示。
 
-    实测依据（22 个样本人工标注比对）：正确样本 score 0.9568~1.0；
-    错误样本 0.8977~0.9445。用户 2026-10-06 确认采用 0.95 门槛。
-
+    行为于 2026-10-08 按需求方要求变更（原行为：一律降级为 ERROR）：
+      需求原文「无结果的图像给出置信度最高的选择，并且告知用户识别置信度低」。
     用 `picture1.jpg`（选对 90° 但 score 0.9348 < 0.95）验证：
-    模型原始输出仍保留在 `returned_latex` 里供诊断，但 `latex` 必须清空。
+    仍返回 latex，但 `message` 必须提示置信度偏低、`meta.reason == "low_confidence"`。
     """
     picture1 = find_photo("picture1.jpg")
     if picture1 is None:
@@ -325,11 +328,14 @@ def test_low_confidence_is_downgraded_to_error():
 
     outcome = Recognizer().recognize(preprocess.decode_base64_image(_b64_of(picture1)))
 
-    assert outcome.confidence < MIN_ACCEPTABLE_SCORE, "该测试依赖 picture1 的 score 低于门槛"
-    assert outcome.status == STATUS_ERROR
-    assert outcome.latex == "", "低置信度结果不应作为 latex 返回"
-    assert outcome.returned_latex, "原始输出应保留在 returned_latex 供诊断"
-    assert outcome.message and "0.95" in outcome.message
+    assert MIN_ACCEPTABLE_SCORE > outcome.confidence >= LOW_CONFIDENCE_SCORE, (
+        f"该测试依赖 picture1 的 score 落在低置信区间，实际 {outcome.confidence}"
+    )
+    assert outcome.status == STATUS_SUCCESS, "低置信度应返回结果，而不是 ERROR"
+    assert outcome.latex, "必须给出最高分候选"
+    assert outcome.message and "置信度偏低" in outcome.message
+    assert outcome.meta["reason"] == "low_confidence"
+    assert outcome.meta["low_confidence_score"] == LOW_CONFIDENCE_SCORE
     assert outcome.meta["reason"] == "low_confidence"
     assert outcome.meta["min_acceptable_score"] == MIN_ACCEPTABLE_SCORE
 
@@ -612,3 +618,90 @@ def test_two_digit_photo_12_needed_crop_retry():
     assert outcome.meta["crop_retry_improved"] is True
     assert outcome.meta["score_before_crop"] < MIN_ACCEPTABLE_SCORE
     assert outcome.confidence >= MIN_ACCEPTABLE_SCORE
+
+
+# ======================================================================================
+# 数字/字母混淆修复（成员 1 于 2026-10-08 新增，依据 PHOTO 39 张人工标注实测失败案例）
+# ======================================================================================
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        # 8 被读成 z（实测 4.jpg：真值 8÷2，模型 z \div2）
+        (r"z \div2", r"8 \div2"),
+        # 上标 2 被读成 z（实测 12.jpg：真值 3^2+1，模型 3^{z}+1）
+        (r"3^{z}+1", r"3^{2}+1"),
+        # 0 被读成度符号（实测 13.jpg：真值 5^0，模型 5^{\circ}）
+        (r"5^{\circ}", r"5^{0}"),
+        # × 被读成字母 x（实测 P5.jpg：真值 …100×4，模型 …100 x 4）
+        (r"4+6+5+68+100 x 4", r"4+6+5+68+100 \times 4"),
+        # 函数名被拆成单字母：`\operatorname{s i n}` → `\sin`（实测 P10.jpg）
+        (r"\operatorname{s i n} \ 6 o^{\circ}", r"\sin \ 60^{\circ}"),
+        # 同样形态的 cot（实测 P8.jpg：`\mathsf{c o t 6 o^{\nu}}`）
+        (r"\mathsf{c o t 6 o^{\nu}}", r"\cot60^{\circ}"),
+        # 函数名拆散 + 数字前多余反斜杠（实测 p1.jpg）
+        (r"\operatorname{C o s} \9", r"\cos 9"),
+    ],
+)
+def test_normalize_digit_confusions_fixes_real_failures(raw, expected):
+    """实测失败案例必须被修复（依据 PHOTO 目录人工标注）。"""
+    assert postprocess.normalize_digit_confusions(raw) == expected
+
+
+@pytest.mark.parametrize(
+    "latex",
+    [
+        r"\tan540^{\circ}",                       # 真三角函数度数不能被改成 ^{0}
+        r"\sin30^{\circ}",
+        r"2 x+5",                                 # 变量 x 不能被当成乘号
+        r"x^{2}+1",
+        r"2^{10}",
+        r"\frac{1024} {64}+\frac{64} {32}",       # 分数不能被拆
+        r"\cos\frac{\pi} {2}+1",
+        r"10 \div5+6 \div3+21 \div7",
+        r"\cot60^{\circ}",                        # cot 是函数名，不能把 o 当 0 后再改坏
+    ],
+)
+def test_normalize_digit_confusions_does_not_break_valid_output(latex):
+    """正常输出必须原样保留（零误伤是这套规则的前提）。"""
+    assert postprocess.normalize_digit_confusions(latex) == latex
+
+
+@pytest.mark.parametrize(
+    "latex",
+    [r"z \div2", r"3^{z}+1", r"5^{\circ}", r"100 x 4", r"6 o^{\circ}", r"\tan540^{\circ}"],
+)
+def test_normalize_digit_confusions_is_idempotent(latex):
+    """幂等：结果再喂一遍不变（避免重复调用产生漂移）。"""
+    once = postprocess.normalize_digit_confusions(latex)
+    assert postprocess.normalize_digit_confusions(once) == once
+
+
+def test_low_confidence_returns_best_guess_with_warning_via_stub(monkeypatch):
+    """同样的低置信度行为，用 stub 精确构造 0.90 分（不依赖真实照片分数漂移）。
+
+    这里 stub 掉整轮 `_run_pass`，只为把「置信度分档」这一段孤立出来验证：
+    `LOW_CONFIDENCE_SCORE <= score < MIN_ACCEPTABLE_SCORE` → 返回结果 + 提示。
+    """
+    assert LOW_CONFIDENCE_SCORE < MIN_ACCEPTABLE_SCORE, "低置信下界必须小于可接受门槛"
+
+    recognizer = Recognizer()
+    monkeypatch.setattr(
+        preprocess, "prepare_candidates",
+        lambda image, **kw: [{"angle": 0, "image": "stub", "exif_corrected": True}],
+    )
+    stub_outcome = RecognitionOutcome(
+        latex=r"\sin60^{\circ}", confidence=0.90, status=STATUS_SUCCESS
+    )
+    monkeypatch.setattr(
+        recognizer, "_run_pass",
+        lambda candidates, *, stage, use_crop: (stub_outcome, [{"angle": 0, "stage": stage,
+                                                               "status": "SUCCESS",
+                                                               "score": 0.90, "reason": "ok",
+                                                               "chars": 13, "seconds": 0.1}]),
+    )
+
+    outcome = recognizer.recognize(object())
+    assert outcome.status == STATUS_SUCCESS, "低置信度应返回结果而不是 ERROR"
+    assert outcome.latex == r"\sin60^{\circ}"
+    assert outcome.message and "置信度偏低" in outcome.message
+    assert outcome.meta["reason"] == "low_confidence"
